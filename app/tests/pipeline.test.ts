@@ -59,7 +59,7 @@ describe('processEmail', () => {
     const line = formatLog('m1', o);
     expect(line).toContain('74000 VND');
     expect(line).toContain('debit=****0000 credit=****1111');
-    expect(line).not.toMatch(/=0000000000|111111111111|TEST/);
+    expect(line).not.toMatch(/(debit|credit)=\d|111111111111|TEST/);
   });
   it('чужой отправитель → карантин', () => {
     const o = processEmail({ id: 'm1', from: 'VCB <x@evil.example>', html, raw: raw(AR_OK) }, own);
