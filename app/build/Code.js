@@ -302,11 +302,15 @@ var ZenApp = (() => {
         try {
           for (const m of thread.getMessages()) {
             const id = m.getId();
-            if (seenSet.has(id)) continue;
+            if (seenSet.has(id)) {
+              console.log(`[dry-run] skip msg=${id}: уже обработано`);
+              continue;
+            }
             const out = processEmail({ id, from: m.getFrom(), html: m.getBody(), raw: m.getRawContent() }, own);
             console.log("[dry-run] " + formatLog(id, out));
             const res = out.status === "parsed" ? "dryrun" : out.status;
             worst = Math.max(worst, RANK.indexOf(res));
+            if (res === "unparsed") continue;
             seen.push(id);
             seenSet.add(id);
           }
