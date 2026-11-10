@@ -76,13 +76,14 @@ export function planMessages(
 /** Длинные цепочки цифр (номера счетов в назначении платежа) → `****1234`; Order Number в маркере не трогаем. */
 const maskLongDigits = (s: string): string => s.replace(/(?<!vcb:)\b\d{8,}/g, (d) => '****' + d.slice(-4));
 
-/** Строка для лога об одной операции. */
-export function formatDecision(d: Decision): string {
+/** Строка для лога об одной операции. `tagTitles` — id категории → название. */
+export function formatDecision(d: Decision, tagTitles: Record<string, string> = {}): string {
   const t = d.txn;
   const sum = t.outcome > 0 && t.income > 0 ? `${t.outcome}→${t.income}` : t.outcome > 0 ? `-${t.outcome}` : `+${t.income}`;
   const acc =
     t.outcomeAccount === t.incomeAccount
       ? t.outcomeAccount.slice(0, 8)
       : `${t.outcomeAccount.slice(0, 8)}→${t.incomeAccount.slice(0, 8)}`;
-  return `${d.action} id=${t.id} ${t.date} ${sum} acc=${acc} comment="${maskLongDigits(t.comment ?? '')}"`;
+  const tag = t.tag?.length ? t.tag.map((id) => tagTitles[id] ?? id).join(',') : '-';
+  return `${d.action} id=${t.id} ${t.date} ${sum} acc=${acc} tag=${tag} comment="${maskLongDigits(t.comment ?? '')}"`;
 }

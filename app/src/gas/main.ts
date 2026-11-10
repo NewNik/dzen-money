@@ -12,6 +12,8 @@ import {
   ZEN_DIFF_URL,
 } from '../core/zen/diff';
 import { formatDecision, planMessages } from '../core/zen/plan';
+import { compileRules, type CompiledRule, type Rule } from '../core/zen/rules';
+import defaultRules from '../../config/rules.json';
 
 const L = {
   inbox: 'zen/inbox',
@@ -40,6 +42,24 @@ function accountsMap(props: GoogleAppsScript.Properties.Properties): Record<stri
   const out: Record<string, string> = {};
   if (raw) for (const [k, v] of Object.entries(JSON.parse(raw) as Record<string, string>)) out[k.replace(/\D/g, '')] = v;
   return out;
+}
+
+/** Правила категорий: личные из свойства RULES (проверяются первыми), затем встроенные из config/rules.json. */
+function loadRules(props: GoogleAppsScript.Properties.Properties, tagsByTitle: Record<string, string>, tag: string): CompiledRule[] {
+  let own: Rule[] = [];
+  const raw = props.getProperty('RULES');
+  if (raw) {
+    try {
+      const v = JSON.parse(raw) as unknown;
+      if (Array.isArray(v)) own = v as Rule[];
+      else console.error(`${tag} RULES: ожидался массив [...]`);
+    } catch (e) {
+      console.error(`${tag} RULES: неверный JSON — ${e instanceof Error ? e.message : String(e)}`);
+    }
+  }
+  const { rules, errors } = compileRules([...own, ...(defaultRules as Rule[])], tagsByTitle);
+  for (const e of errors) console.error(`${tag} ${e}`);
+  return rules;
 }
 
 const isWriteMode = (props: GoogleAppsScript.Properties.Properties): boolean =>
@@ -74,16 +94,17 @@ function syncToZen(pending: Msg[], accounts: Record<string, string>, token: stri
   // Полная выгрузка (~2,5 МБ) только когда есть что записать: нужна для проверки дублей по всем операциям.
   const full = zenDiff(token, fullFetchRequest(now));
   const meta = readMeta(full);
+  const rules = loadRules(PropertiesService.getScriptProperties(), meta.tagsByTitle, tag);
   const plans = planMessages(
     pending.map((m) => ({ msgId: m.id, txn: m.txn! })),
-    { accounts, userId: meta.userId, instruments: meta.instruments, now },
+    { accounts, userId: meta.userId, instruments: meta.instruments, now, rules },
     meta.accountIds,
     readTransactions(full),
   );
 
   const byId = new Map(pending.map((m) => [m.id, m]));
   for (const p of plans) {
-    for (const d of p.decisions) console.log(`${tag} msg=${p.msgId} ${formatDecision(d)}`);
+    for (const d of p.decisions) console.log(`${tag} msg=${p.msgId} ${formatDecision(d, meta.tagTitles)}`);
     if (p.reason) console.log(`${tag} msg=${p.msgId} ${p.status}: ${p.reason}`);
     const m = byId.get(p.msgId)!;
     m.result =
@@ -206,11 +227,15 @@ export function checkZen(): void {
     return;
   }
   const now = Math.floor(Date.now() / 1000);
-  const meta = readMeta(zenDiff(token, { currentClientTimestamp: now, serverTimestamp: now, forceFetch: ['user', 'instrument', 'account'] }));
+  const meta = readMeta(
+    zenDiff(token, { currentClientTimestamp: now, serverTimestamp: now, forceFetch: ['user', 'instrument', 'account', 'tag'] }),
+  );
   console.log(`Токен работает. Пользователь ${meta.userId}, VND = ${meta.instruments.VND ?? 'не найден'}.`);
   for (const [num, uuid] of Object.entries(accountsMap(props))) {
     console.log(`${maskAccount(num)} → ${uuid}: ${meta.accountIds.has(uuid) ? 'счёт найден' : 'НЕТ такого счёта (или он в архиве)'}`);
   }
+  const rules = loadRules(props, meta.tagsByTitle, '[rules]');
+  console.log(`Правил категорий: ${rules.length} (ошибки, если есть, — строками выше).`);
   console.log(`Режим: ${isWriteMode(props) ? 'write — запись включена' : 'dry-run — запись выключена'}.`);
 }
 

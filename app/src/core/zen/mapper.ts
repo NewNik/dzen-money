@@ -1,6 +1,7 @@
 // Разобранное письмо → операции Дзен-мани. Без сети и GAS API.
 import type { ParsedBankTxn, ZenTransaction } from '../types';
 import { vcbTxnId } from '../uuid';
+import { findRule, type CompiledRule } from './rules';
 
 export interface ZenContext {
   /** Номер счёта VCB (только цифры) → UUID счёта в Дзен-мани. */
@@ -11,6 +12,8 @@ export interface ZenContext {
   instruments: Record<string, number>;
   /** Текущее время, секунды Unix. */
   now: number;
+  /** Правила категорий; без совпадения категория не ставится (её может угадать сам Дзен-мани). */
+  rules?: readonly CompiledRule[];
 }
 
 export type MapResult = { ok: true; txns: ZenTransaction[] } | { ok: false; reason: string };
@@ -93,8 +96,10 @@ export function toZenTransactions(t: ParsedBankTxn, ctx: ZenContext): MapResult 
       return { ok: false, reason: 'ни один счёт из письма не указан в ACCOUNTS' };
   }
 
+  const rule = findRule(t, ctx.rules ?? []);
   const main: ZenTransaction = {
     ...blank(ctx),
+    tag: rule ? [rule.tagId] : null,
     id: vcbTxnId(t.orderNumber),
     incomeInstrument: instrument,
     incomeAccount,
@@ -102,7 +107,7 @@ export function toZenTransactions(t: ParsedBankTxn, ctx: ZenContext): MapResult 
     outcomeInstrument: instrument,
     outcomeAccount,
     outcome,
-    payee,
+    payee: rule?.rule.payee ?? payee,
     originalPayee: payee,
     comment: withMarker(cleanDetails(t.details, t.remitter), marker(t.orderNumber)),
     date: t.dateLocal,

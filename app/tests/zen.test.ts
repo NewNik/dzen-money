@@ -5,6 +5,8 @@ import { planWrites, type ExistingTxn } from '../src/core/zen/dedup';
 import { missingAfterWrite, readMeta, writeRequest } from '../src/core/zen/diff';
 import { toZenTransactions, type ZenContext } from '../src/core/zen/mapper';
 import { formatDecision, planMessages } from '../src/core/zen/plan';
+import { compileRules, findRule, foldText, type Rule } from '../src/core/zen/rules';
+import defaultRules from '../config/rules.json';
 
 const ACC_A = 'aaaaaaaa-0000-4000-8000-000000000001';
 const ACC_B = 'bbbbbbbb-0000-4000-8000-000000000002';
@@ -195,7 +197,7 @@ describe('план по письмам', () => {
   it('лог маскирует длинные номера в комментарии', () => {
     const [p] = planMessages([{ msgId: 'a', txn: parsed({ details: 'MBVCB.1234567890851.x' }) }], ctx, ids, []);
     expect(formatDecision(p!.decisions[0]!)).toBe(
-      `create id=${vcbTxnId('00000000001')} 2026-11-08 -74000 acc=aaaaaaaa comment="MBVCB.****0851.x [vcb:00000000001]"`,
+      `create id=${vcbTxnId('00000000001')} 2026-11-08 -74000 acc=aaaaaaaa tag=- comment="MBVCB.****0851.x [vcb:00000000001]"`,
     );
   });
 });
@@ -219,5 +221,73 @@ describe('diff', () => {
   });
   it('проверка ответа на запись', () => {
     expect(missingAfterWrite({ transaction: [{ id: 'x' }] }, ['x', 'y'])).toEqual(['y']);
+  });
+});
+
+describe('правила категорий', () => {
+  const tags = { коммуналка: 'tag-util', связь: 'tag-tel', 'досуг': 'tag-fun' };
+  // Письмо от 07.11.2026 (оплата электричества), счёт и номер договора заменены.
+  const evn = parsed({
+    beneficiaryName: 'EVN Miền Trung',
+    details: 'MBVCB00000000001_20261107_EVNCPC_PQ00000000000',
+    amount: 3084912,
+  });
+
+  it('foldText: регистр, диакритика, đ', () => {
+    expect(foldText('  EVN  Miền Trung Đà Nẵng ')).toBe('evn mien trung da nang');
+  });
+  it('встроенные правила компилируются и ловят EVN по получателю и по назначению', () => {
+    const { rules, errors } = compileRules(defaultRules as Rule[], tags);
+    expect(errors).toEqual([]);
+    expect(findRule(evn, rules)?.tagId).toBe('tag-util');
+    expect(findRule(parsed({ beneficiaryName: 'X', details: 'MBVCB1_2_EVNCPC_PQ1' }), rules)?.tagId).toBe('tag-util');
+    expect(findRule(parsed({ beneficiaryName: 'STEVEN NGUYEN', details: 'never' }), rules)).toBeUndefined();
+  });
+  it('маппер ставит категорию и подменяет получателя, originalPayee — как в письме', () => {
+    const { rules } = compileRules(defaultRules as Rule[], tags);
+    const r = toZenTransactions(evn, { ...ctx, rules });
+    expect(r.ok && [r.txns[0]!.tag, r.txns[0]!.payee, r.txns[0]!.originalPayee]).toEqual([
+      ['tag-util'],
+      'EVN (электричество)',
+      'EVN Miền Trung',
+    ]);
+  });
+  it('без совпадения категория null', () => {
+    const { rules } = compileRules(defaultRules as Rule[], tags);
+    const r = toZenTransactions(parsed(), { ...ctx, rules });
+    expect(r.ok && r.txns[0]!.tag).toBeNull();
+  });
+  it('подстрока, поле, порядок: первое совпадение побеждает', () => {
+    const { rules } = compileRules(
+      [
+        { match: 'nguyen van', field: 'payee', tag: 'Связь' },
+        { match: 'shop', tag: 'Досуг ' },
+      ],
+      tags,
+    );
+    expect(findRule(parsed({ beneficiaryName: 'NGUYỄN VĂN A' }), rules)?.tagId).toBe('tag-tel');
+    expect(findRule(parsed({ beneficiaryName: 'B', details: 'nguyen van' }), rules)).toBeUndefined(); // только payee
+    expect(findRule(parsed({ beneficiaryName: 'TEST SHOP' }), rules)?.tagId).toBe('tag-fun');
+  });
+  it('перевод между своими не категоризируется', () => {
+    const { rules } = compileRules([{ match: 'shop', tag: 'Связь' }], tags);
+    expect(findRule(parsed({ kind: 'transfer' }), rules)).toBeUndefined();
+  });
+  it('ошибки в правилах — в список, остальные работают', () => {
+    const r = compileRules(
+      [{ match: 'a', tag: 'Нет такой' }, { match: '/(/', tag: 'Связь' }, { tag: 'Связь' } as Rule, { match: 'b', tag: 'Связь' }],
+      tags,
+    );
+    expect(r.rules).toHaveLength(1);
+    expect(r.errors).toEqual([
+      'правило 1 (a): нет категории «Нет такой» в Дзен-мани',
+      'правило 2 (/(/): неверная регулярка',
+      'правило 3 (?): нужны поля match и tag',
+    ]);
+  });
+  it('лог показывает название категории', () => {
+    const { rules } = compileRules(defaultRules as Rule[], tags);
+    const [p] = planMessages([{ msgId: 'a', txn: evn }], { ...ctx, rules }, ids, []);
+    expect(formatDecision(p!.decisions[0]!, { 'tag-util': 'Коммуналка' })).toContain('tag=Коммуналка');
   });
 });

@@ -1,6 +1,7 @@
 // Запросы и ответы POST /v8/diff/. Сам HTTP-вызов — в слое Apps Script.
 import type { ZenDiffRequest, ZenTransaction } from '../types';
 import type { ExistingTxn } from './dedup';
+import { tagKey } from './rules';
 
 export const ZEN_DIFF_URL = 'https://api.zenmoney.ru/v8/diff/';
 
@@ -10,6 +11,10 @@ export interface ZenMeta {
   instruments: Record<string, number>;
   /** UUID неархивных счетов. */
   accountIds: Set<string>;
+  /** Ключ названия категории (`tagKey`) → id. */
+  tagsByTitle: Record<string, string>;
+  /** id категории → название (для журнала). */
+  tagTitles: Record<string, string>;
 }
 
 interface RawDiff {
@@ -17,6 +22,7 @@ interface RawDiff {
   user?: { id: number; parent: number | null }[];
   instrument?: { id: number; shortTitle: string }[];
   account?: { id: string; archive?: boolean }[];
+  tag?: { id: string; title: string }[];
   transaction?: ExistingTxn[];
 }
 
@@ -35,6 +41,8 @@ export function readMeta(resp: unknown): ZenMeta {
     userId: parents[0]!.id,
     instruments,
     accountIds: new Set((d.account ?? []).filter((a) => !a.archive).map((a) => a.id)),
+    tagsByTitle: Object.fromEntries((d.tag ?? []).map((t) => [tagKey(t.title), t.id])),
+    tagTitles: Object.fromEntries((d.tag ?? []).map((t) => [t.id, t.title.trim()])),
   };
 }
 

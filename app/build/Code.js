@@ -272,6 +272,53 @@ var ZenApp = (() => {
     return `parsed msg=${id} order=${t.orderNumber} ${t.occurredAtLocal} ${t.amount} ${t.currency} fee=${t.feeAmount} kind=${t.kind} debit=${maskAccount(t.debitAccount)} credit=${maskAccount(t.creditAccount)} (${authStr(t.auth)})`;
   }
 
+  // src/core/zen/rules.ts
+  function foldText(s) {
+    return s.normalize("NFD").replace(/\p{M}/gu, "").replace(/[đĐ]/g, "d").toLowerCase().replace(/\s+/g, " ").trim();
+  }
+  var tagKey = (title) => title.trim().toLowerCase();
+  function compileRules(rules, tagsByTitle) {
+    const out = [];
+    const errors = [];
+    rules.forEach((rule, i) => {
+      const where = `правило ${i + 1} (${rule.match ?? "?"})`;
+      if (!rule || typeof rule.match !== "string" || !rule.match.trim() || typeof rule.tag !== "string") {
+        errors.push(`${where}: нужны поля match и tag`);
+        return;
+      }
+      const tagId = tagsByTitle[tagKey(rule.tag)];
+      if (!tagId) {
+        errors.push(`${where}: нет категории «${rule.tag}» в Дзен-мани`);
+        return;
+      }
+      let test;
+      const re = /^\/(.+)\/$/.exec(rule.match);
+      if (re) {
+        try {
+          const rx = new RegExp(re[1], "i");
+          test = (s) => rx.test(s);
+        } catch {
+          errors.push(`${where}: неверная регулярка`);
+          return;
+        }
+      } else {
+        const needle = foldText(rule.match);
+        test = (s) => s.includes(needle);
+      }
+      out.push({ rule, tagId, test });
+    });
+    return { rules: out, errors };
+  }
+  function findRule(t, rules) {
+    if (t.kind !== "expense" && t.kind !== "income") return void 0;
+    const payee = foldText((t.kind === "expense" ? t.beneficiaryName : t.remitter) ?? "");
+    const details = foldText(t.details ?? "");
+    return rules.find(({ rule, test }) => {
+      const f = rule.field ?? "any";
+      return (f === "payee" || f === "any") && payee !== "" && test(payee) || (f === "details" || f === "any") && details !== "" && test(details);
+    });
+  }
+
   // src/core/zen/diff.ts
   var ZEN_DIFF_URL = "https://api.zenmoney.ru/v8/diff/";
   var fullFetchRequest = (now) => ({ currentClientTimestamp: now, serverTimestamp: 0 });
@@ -286,7 +333,9 @@ var ZenApp = (() => {
       serverTimestamp: d.serverTimestamp,
       userId: parents[0].id,
       instruments,
-      accountIds: new Set((d.account ?? []).filter((a) => !a.archive).map((a) => a.id))
+      accountIds: new Set((d.account ?? []).filter((a) => !a.archive).map((a) => a.id)),
+      tagsByTitle: Object.fromEntries((d.tag ?? []).map((t) => [tagKey(t.title), t.id])),
+      tagTitles: Object.fromEntries((d.tag ?? []).map((t) => [t.id, t.title.trim()]))
     };
   }
   var readTransactions = (resp) => resp.transaction ?? [];
@@ -452,8 +501,10 @@ var ZenApp = (() => {
       default:
         return { ok: false, reason: "ни один счёт из письма не указан в ACCOUNTS" };
     }
+    const rule = findRule(t, ctx.rules ?? []);
     const main = {
       ...blank(ctx),
+      tag: rule ? [rule.tagId] : null,
       id: vcbTxnId(t.orderNumber),
       incomeInstrument: instrument,
       incomeAccount,
@@ -461,7 +512,7 @@ var ZenApp = (() => {
       outcomeInstrument: instrument,
       outcomeAccount,
       outcome,
-      payee,
+      payee: rule?.rule.payee ?? payee,
       originalPayee: payee,
       comment: withMarker(cleanDetails(t.details, t.remitter), marker(t.orderNumber)),
       date: t.dateLocal
@@ -532,12 +583,19 @@ var ZenApp = (() => {
     return items.map((i) => plans.get(i.msgId));
   }
   var maskLongDigits = (s) => s.replace(/(?<!vcb:)\b\d{8,}/g, (d) => "****" + d.slice(-4));
-  function formatDecision(d) {
+  function formatDecision(d, tagTitles = {}) {
     const t = d.txn;
     const sum = t.outcome > 0 && t.income > 0 ? `${t.outcome}→${t.income}` : t.outcome > 0 ? `-${t.outcome}` : `+${t.income}`;
     const acc = t.outcomeAccount === t.incomeAccount ? t.outcomeAccount.slice(0, 8) : `${t.outcomeAccount.slice(0, 8)}→${t.incomeAccount.slice(0, 8)}`;
-    return `${d.action} id=${t.id} ${t.date} ${sum} acc=${acc} comment="${maskLongDigits(t.comment ?? "")}"`;
+    const tag = t.tag?.length ? t.tag.map((id) => tagTitles[id] ?? id).join(",") : "-";
+    return `${d.action} id=${t.id} ${t.date} ${sum} acc=${acc} tag=${tag} comment="${maskLongDigits(t.comment ?? "")}"`;
   }
+
+  // config/rules.json
+  var rules_default = [
+    { match: "/(^|[^a-z])evn/", tag: "Коммуналка", payee: "EVN (электричество)" },
+    { match: "/\\bcap nuoc\\b/", tag: "Коммуналка" }
+  ];
 
   // src/gas/main.ts
   var L = {
@@ -566,6 +624,22 @@ var ZenApp = (() => {
     if (raw) for (const [k, v] of Object.entries(JSON.parse(raw))) out[k.replace(/\D/g, "")] = v;
     return out;
   }
+  function loadRules(props, tagsByTitle, tag) {
+    let own = [];
+    const raw = props.getProperty("RULES");
+    if (raw) {
+      try {
+        const v = JSON.parse(raw);
+        if (Array.isArray(v)) own = v;
+        else console.error(`${tag} RULES: ожидался массив [...]`);
+      } catch (e) {
+        console.error(`${tag} RULES: неверный JSON — ${e instanceof Error ? e.message : String(e)}`);
+      }
+    }
+    const { rules, errors } = compileRules([...own, ...rules_default], tagsByTitle);
+    for (const e of errors) console.error(`${tag} ${e}`);
+    return rules;
+  }
   var isWriteMode = (props) => (props.getProperty("MODE") ?? "").trim().toLowerCase() === "write";
   function zenDiff(token, body) {
     if ("deletion" in body) throw new Error("deletion в Дзен-мани не отправляем");
@@ -585,15 +659,16 @@ var ZenApp = (() => {
     const now = Math.floor(Date.now() / 1e3);
     const full = zenDiff(token, fullFetchRequest(now));
     const meta = readMeta(full);
+    const rules = loadRules(PropertiesService.getScriptProperties(), meta.tagsByTitle, tag);
     const plans = planMessages(
       pending.map((m) => ({ msgId: m.id, txn: m.txn })),
-      { accounts, userId: meta.userId, instruments: meta.instruments, now },
+      { accounts, userId: meta.userId, instruments: meta.instruments, now, rules },
       meta.accountIds,
       readTransactions(full)
     );
     const byId = new Map(pending.map((m) => [m.id, m]));
     for (const p of plans) {
-      for (const d of p.decisions) console.log(`${tag} msg=${p.msgId} ${formatDecision(d)}`);
+      for (const d of p.decisions) console.log(`${tag} msg=${p.msgId} ${formatDecision(d, meta.tagTitles)}`);
       if (p.reason) console.log(`${tag} msg=${p.msgId} ${p.status}: ${p.reason}`);
       const m = byId.get(p.msgId);
       m.result = p.status === "done" ? "done" : p.status === "duplicate" ? "duplicate" : p.status === "unmapped" ? "unparsed" : write ? null : "dryrun";
@@ -699,11 +774,15 @@ var ZenApp = (() => {
       return;
     }
     const now = Math.floor(Date.now() / 1e3);
-    const meta = readMeta(zenDiff(token, { currentClientTimestamp: now, serverTimestamp: now, forceFetch: ["user", "instrument", "account"] }));
+    const meta = readMeta(
+      zenDiff(token, { currentClientTimestamp: now, serverTimestamp: now, forceFetch: ["user", "instrument", "account", "tag"] })
+    );
     console.log(`Токен работает. Пользователь ${meta.userId}, VND = ${meta.instruments.VND ?? "не найден"}.`);
     for (const [num, uuid] of Object.entries(accountsMap(props))) {
       console.log(`${maskAccount(num)} → ${uuid}: ${meta.accountIds.has(uuid) ? "счёт найден" : "НЕТ такого счёта (или он в архиве)"}`);
     }
+    const rules = loadRules(props, meta.tagsByTitle, "[rules]");
+    console.log(`Правил категорий: ${rules.length} (ошибки, если есть, — строками выше).`);
     console.log(`Режим: ${isWriteMode(props) ? "write — запись включена" : "dry-run — запись выключена"}.`);
   }
   function install() {
