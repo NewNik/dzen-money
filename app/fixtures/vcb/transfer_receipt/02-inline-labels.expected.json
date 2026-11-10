@@ -1,0 +1,19 @@
+{
+  "source": "vcb-email",
+  "emailType": "transfer_receipt",
+  "gmailMessageId": "test",
+  "orderNumber": "00000000002",
+  "occurredAtLocal": "2026-11-09T00:15:00+07:00",
+  "dateLocal": "2026-11-09",
+  "amount": 1234567,
+  "currency": "VND",
+  "feeAmount": 1100,
+  "debitAccount": "0000000000",
+  "creditAccount": "2222222222",
+  "remitter": "TEST USER",
+  "beneficiaryName": "TEST USER TWO",
+  "beneficiaryBank": "Vietcombank",
+  "details": "Tien nha thang 11: dot 1",
+  "kind": "transfer",
+  "auth": { "dkim": true, "spf": true, "dmarc": true }
+}

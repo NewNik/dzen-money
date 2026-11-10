@@ -14,6 +14,7 @@
 | beneficiaryName | Tên người hưởng / Beneficiary Name | |
 | beneficiaryBank | Tên ngân hàng hưởng / Beneficiary Bank Name | |
 | amount | Số tiền / Amount | `74,000 VND` |
+| chargeCode | Loại phí / Charge Code | `Người chuyển trả / Exclude` |
 | chargeAmount | Số tiền phí / Charge Amount | `0 VND` |
 | details | Nội dung chuyển tiền / Details of Payment | |
 
@@ -26,6 +27,11 @@
 - Идемпотентность: UUIDv5 от `vcb:<orderNumber>`.
 - Проверять `Authentication-Results`: dkim/spf/dmarc = pass, иначе карантин.
 - Комиссия > 0 — отдельная операция с id от `vcb:<order>:fee`.
+
+## Реализация
+`app/src/core/banks/vcb/transfer-receipt.ts`. Подпись ищется точным сравнением (части «vi / en», без учёта регистра), значение — хвост ячейки после двоеточия либо следующая ячейка, не являющаяся подписью. Обязательные поля: дата, Order Number, сумма, комиссия; при отсутствии — ошибка.
+
+Фикстуры в `app/fixtures/vcb/transfer_receipt/` синтетические: реальная HTML-вёрстка письма ещё не получена.
 
 ## Другие типы писем
 Входящие переводы, оплата картой, снятие наличных, QR, изменение баланса — образцы не получены. См. открытые вопросы в [../plan.md](../plan.md).

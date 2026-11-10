@@ -19,6 +19,7 @@ export interface ParsedBankTxn {
   feeAmount: number;
   debitAccount?: string;
   creditAccount?: string;
+  remitter?: string;
   beneficiaryName?: string;
   beneficiaryBank?: string;
   details?: string;
@@ -27,7 +28,7 @@ export interface ParsedBankTxn {
 }
 
 export interface ZenTransaction {
-  id: string; // UUIDv5 от orderNumber
+  id: string; // UUIDv5 от `vcb:<orderNumber>`
   changed: number;
   created: number;
   user: number;
