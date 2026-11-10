@@ -78,7 +78,7 @@
 
 ```json
 [
-  {"match": "nguyen van quoc", "tag": "Рестораны"},
+  {"match": "nguyen van a", "field": "payee", "tag": "Рестораны"},
   {"match": "tien nha", "field": "details", "tag": "Аренда", "payee": "Аренда квартиры"}
 ]
 ```
