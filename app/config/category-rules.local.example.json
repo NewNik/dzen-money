@@ -1,5 +1,0 @@
-[
-  { "beneficiary": "HO KINH DOANH TEST SHOP", "tag": "Питание / Продукты" },
-  { "beneficiary": "TEST SPOUSE", "transferTo": "VND | Второй счёт" },
-  { "beneficiary": "TEST MARKETPLACE", "tag": null, "needsReview": true }
-]

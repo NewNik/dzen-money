@@ -6,3 +6,4 @@
 - [vcb-emails/](vcb-emails/) — форматы писем Vietcombank по типам
 - [decisions/](decisions/) — принятые решения (ADR-lite)
 - [samples/](samples/) — обезличенные примеры писем
+- [category-rules.md](category-rules.md) — правила категорий: анализ истории Дзен-мани и сверка с письмами

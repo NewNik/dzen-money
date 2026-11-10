@@ -1,4 +1,5 @@
-// Парсер письма «Biên lai chuyển tiền qua tài khoản» (Payment Receipt).
+// Парсер квитанций VCB (Payment Receipt): перевод по счёту, перевод «на счёт/карту»,
+// оплата счёта (QR Pay) и перевод на карту. Набор подписей у них разный, разбор общий.
 // Формат описан в kb/vcb-emails/transfer-receipt.md.
 import { htmlToCells, normalizeText } from '../../html';
 import type { ParsedBankTxn, TxnKind } from '../../types';
@@ -11,7 +12,11 @@ type Field =
   | 'creditAccount'
   | 'beneficiaryName'
   | 'beneficiaryBank'
+  | 'accountNumber'
+  | 'billCode'
   | 'amount'
+  | 'creditAmount'
+  | 'exchangeRate'
   | 'chargeCode'
   | 'chargeAmount'
   | 'details';
@@ -21,14 +26,27 @@ const LABELS: Record<Field, string[]> = {
   dateTime: ['Ngày, giờ giao dịch', 'Trans. Date, Time'],
   orderNumber: ['Số lệnh giao dịch', 'Order Number'],
   debitAccount: ['Tài khoản nguồn', 'Debit Account'],
-  remitter: ['Tên người chuyển tiền', "Remitter's name"],
-  creditAccount: ['Tài khoản người hưởng', 'Credit Account'],
+  remitter: ['Tên người chuyển tiền', 'Tên tài khoản nguồn', "Remitter's name"],
+  creditAccount: [
+    'Tài khoản người hưởng',
+    'Tài khoản hưởng',
+    'Credit Account',
+    'Tài khoản/ Thẻ người hưởng',
+    'Credit Account/ Card',
+    'Số thẻ chuyển đến',
+    'Destination Card Number',
+  ],
+  // В переводе «на счёт/карту» Credit Account — виртуальный QR-счёт, настоящий номер — здесь.
+  accountNumber: ['Số tài khoản thụ hưởng', 'Account number'],
+  billCode: ['Mã hóa đơn/Mã khách hàng', 'Bill code/Customer code'],
   beneficiaryName: ['Tên người hưởng', 'Beneficiary Name'],
   beneficiaryBank: ['Tên ngân hàng hưởng', 'Beneficiary Bank Name'],
-  amount: ['Số tiền', 'Amount'],
+  amount: ['Số tiền', 'Amount', 'Số tiền trích nợ', 'Debit Amount'],
+  creditAmount: ['Số tiền ghi có', 'Credit Amount'],
+  exchangeRate: ['Tỷ giá quy đổi', 'Exchange Rate'],
   chargeCode: ['Loại phí', 'Charge Code'],
-  chargeAmount: ['Số tiền phí', 'Charge Amount'],
-  details: ['Nội dung chuyển tiền', 'Details of Payment'],
+  chargeAmount: ['Số tiền phí', 'Charge Amount', 'Fee Amount'],
+  details: ['Nội dung chuyển tiền', 'Nội dung chuyểntiền', 'Nội dung thanh toán', 'Details of Payment'],
 };
 
 const REQUIRED: Field[] = ['dateTime', 'orderNumber', 'amount', 'chargeAmount'];
@@ -43,6 +61,9 @@ function asLabel(cell: string): { field: Field; inline: string } | null {
   const colon = cell.indexOf(':');
   const head = colon >= 0 ? cell.slice(0, colon) : cell;
   const inline = colon >= 0 ? normalizeText(cell.slice(colon + 1)) : '';
+  // Подписи с косой чертой внутри («Credit Account/ Card») сначала ищем целиком.
+  const whole = LABEL_INDEX.get(key(head));
+  if (whole !== undefined) return { field: whole, inline };
   let field: Field | undefined;
   for (const part of head.split('/')) {
     const f = LABEL_INDEX.get(key(part));
@@ -161,6 +182,13 @@ export function parseTransferReceiptCells(cells: string[], ctx: ParseContext): P
   if (!dt) return { ok: false, error: 'не разобрана дата' };
   const amount = parseVcbAmount(f.amount!);
   if (!amount || amount.amount <= 0) return { ok: false, error: 'не разобрана сумма' };
+  if (f.creditAmount !== undefined) {
+    // Перевод «на счёт/карту»: суммы списания и зачисления должны совпадать, иначе это конвертация.
+    const credited = parseVcbAmount(f.creditAmount);
+    if (!credited || credited.amount !== amount.amount || credited.currency !== amount.currency) {
+      return { ok: false, error: 'суммы списания и зачисления различаются' };
+    }
+  }
   const fee = parseVcbFee(runs.chargeAmount ?? []);
   if ('error' in fee) return { ok: false, error: fee.error };
   if (fee.amount > 0 && fee.currency !== amount.currency) return { ok: false, error: 'валюта комиссии отличается' };
@@ -168,7 +196,7 @@ export function parseTransferReceiptCells(cells: string[], ctx: ParseContext): P
   if (!/^[A-Za-z0-9-]+$/.test(orderNumber)) return { ok: false, error: 'не разобран Order Number' };
 
   const debitAccount = digits(f.debitAccount);
-  const creditAccount = digits(f.creditAccount);
+  const creditAccount = digits(f.accountNumber) ?? digits(f.creditAccount);
   return {
     ok: true,
     txn: {
@@ -185,6 +213,7 @@ export function parseTransferReceiptCells(cells: string[], ctx: ParseContext): P
       remitter: f.remitter,
       beneficiaryName: f.beneficiaryName,
       beneficiaryBank: f.beneficiaryBank,
+      billCode: f.billCode,
       details: f.details,
       kind: classify(debitAccount, creditAccount, ctx.ownAccounts),
       auth: ctx.auth,

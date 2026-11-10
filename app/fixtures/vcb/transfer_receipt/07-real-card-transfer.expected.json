@@ -1,0 +1,21 @@
+{
+  "source": "vcb-email",
+  "emailType": "transfer_receipt",
+  "gmailMessageId": "test",
+  "orderNumber": "10000000004",
+  "occurredAtLocal": "2026-08-09T19:10:00+07:00",
+  "dateLocal": "2026-08-09",
+  "amount": 637000,
+  "currency": "VND",
+  "feeAmount": 0,
+  "debitAccount": "0000000000",
+  "remitter": "TEST USER",
+  "beneficiaryName": "TRAN VAN TEST",
+  "details": "TEST USER transfer",
+  "kind": "expense",
+  "auth": {
+    "dkim": true,
+    "spf": true,
+    "dmarc": true
+  }
+}

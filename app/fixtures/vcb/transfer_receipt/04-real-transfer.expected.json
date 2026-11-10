@@ -1,0 +1,23 @@
+{
+  "source": "vcb-email",
+  "emailType": "transfer_receipt",
+  "gmailMessageId": "test",
+  "orderNumber": "10000000001",
+  "occurredAtLocal": "2026-11-09T21:57:00+07:00",
+  "dateLocal": "2026-11-09",
+  "amount": 80000,
+  "currency": "VND",
+  "feeAmount": 0,
+  "debitAccount": "0000000000",
+  "creditAccount": "11111111111",
+  "remitter": "TEST USER",
+  "beneficiaryName": "HO KINH DOANH MINI MART TEST",
+  "beneficiaryBank": "TienPhong Commercial Joint Stock Bank",
+  "details": "TEST USER transfer",
+  "kind": "expense",
+  "auth": {
+    "dkim": true,
+    "spf": true,
+    "dmarc": true
+  }
+}

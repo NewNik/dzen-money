@@ -1,0 +1,22 @@
+{
+  "source": "vcb-email",
+  "emailType": "transfer_receipt",
+  "gmailMessageId": "test",
+  "orderNumber": "10000000002",
+  "occurredAtLocal": "2026-11-09T19:11:00+07:00",
+  "dateLocal": "2026-11-09",
+  "amount": 186000,
+  "currency": "VND",
+  "feeAmount": 0,
+  "debitAccount": "0000000000",
+  "creditAccount": "3333333333",
+  "beneficiaryName": "NGUYEN VAN TEST",
+  "beneficiaryBank": "Vietcombank",
+  "details": "TEST USER transfer",
+  "kind": "expense",
+  "auth": {
+    "dkim": true,
+    "spf": true,
+    "dmarc": true
+  }
+}

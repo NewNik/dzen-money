@@ -7,3 +7,7 @@ app/config/*.json
 *.eml
 .DS_Store
 .clasp.json
+!app/config/rules.json
+*.mbox
+*.mbox.zip
+takeout*/

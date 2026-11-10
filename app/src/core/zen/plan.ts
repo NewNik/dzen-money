@@ -55,7 +55,8 @@ export function planMessages(
 
   // Дубли проверяем по всей пачке сразу: одна ручная операция не закроет два письма.
   const redo = new Set([...redoOrders].flatMap((o) => [vcbTxnId(o), vcbTxnId(o, true)]));
-  const decisions = planWrites(mapped.flatMap((m) => m.txns), existing, redo);
+  const own = new Set(Object.values(ctx.accounts));
+  const decisions = planWrites(mapped.flatMap((m) => m.txns), existing, redo, own);
   let k = 0;
   for (const m of mapped) {
     const ds = decisions.slice(k, (k += m.txns.length));
@@ -65,7 +66,9 @@ export function planMessages(
       plans.set(m.msgId, {
         msgId: m.msgId,
         status: 'duplicate',
-        reason: `похожая ручная операция ${dup.match.date} на ${amount} (id ${dup.match.id})`,
+        reason:
+          `похожая ручная операция ${dup.match.date} на ${amount} (id ${dup.match.id})` +
+          (dup.fuzzy ? ' — сумма отличается, проверить' : ''),
         decisions: ds,
         creates: [],
       });

@@ -152,13 +152,32 @@ describe('проверка дублей', () => {
   it('другая дата, сумма, счёт, удалённая или с маркером — не дубль', () => {
     for (const e of [
       existing({ date: '2026-11-10' }),
-      existing({ outcome: 74001 }),
+      existing({ outcome: 80000 }),
       existing({ outcomeAccount: ACC_B, incomeAccount: ACC_B }),
       existing({ deleted: true }),
       existing({ comment: 'x [vcb:00000000099]' }),
     ]) {
       expect(planWrites([cand!], [e])[0]!.action).toBe('create');
     }
+  });
+  it('сумма округлена или с опечаткой (до 3 %, минимум 1000) — неточный дубль', () => {
+    const d = planWrites([cand!], [existing({ outcome: 74500 })])[0]!;
+    expect(d).toMatchObject({ action: 'manual-duplicate', fuzzy: true });
+    expect(planWrites([cand!], [existing({ outcome: 76500 })])[0]!.action).toBe('create');
+    expect(planWrites([cand!], [existing({})])[0]).toMatchObject({ action: 'manual-duplicate', fuzzy: false });
+    const [big] = ok(parsed({ amount: 1_000_000 }));
+    expect(planWrites([big!], [existing({ outcome: 1_029_000 })])[0]!.action).toBe('manual-duplicate');
+    expect(planWrites([big!], [existing({ outcome: 1_031_000 })])[0]!.action).toBe('create');
+  });
+  it('точное совпадение занимает ручную операцию раньше неточного', () => {
+    const [near] = ok(parsed({ orderNumber: '00000000002', amount: 74500 }));
+    const ds = planWrites([near!, cand!], [existing({})]);
+    expect(ds.map((d) => d.action)).toEqual(['create', 'manual-duplicate']);
+  });
+  it('расход, записанный вручную на другой свой счёт, — дубль', () => {
+    const other = existing({ outcomeAccount: ACC_B, incomeAccount: ACC_B });
+    expect(planWrites([cand!], [other], new Set(), new Set([ACC_A, ACC_B]))[0]!.action).toBe('manual-duplicate');
+    expect(planWrites([cand!], [other], new Set(), new Set([ACC_A]))[0]!.action).toBe('create');
   });
   it('одна ручная операция закрывает только одно письмо', () => {
     const [second] = ok(parsed({ orderNumber: '00000000002' }));
@@ -267,12 +286,59 @@ describe('правила категорий', () => {
     expect(foldText('  EVN  Miền Trung Đà Nẵng ')).toBe('evn mien trung da nang');
   });
   it('встроенные правила компилируются и ловят EVN по получателю и по назначению', () => {
-    const { rules, errors } = compileRules(defaultRules as Rule[], tags);
+    const all = Object.fromEntries(
+      (defaultRules as Rule[]).filter((r) => r.tag !== null).map((r) => [r.tag!.toLowerCase(), 'tag-' + r.tag]),
+    );
+    const { rules, errors } = compileRules(defaultRules as Rule[], { ...all, ...tags });
     expect(errors).toEqual([]);
     expect(findRule(evn, rules)?.tagId).toBe('tag-util');
     expect(findRule(parsed({ beneficiaryName: 'X', details: 'MBVCB1_2_EVNCPC_PQ1' }), rules)?.tagId).toBe('tag-util');
     expect(findRule(parsed({ beneficiaryName: 'STEVEN NGUYEN', details: 'never' }), rules)).toBeUndefined();
   });
+  describe('встроенные правила по письмам', () => {
+    const all = Object.fromEntries(
+      (defaultRules as Rule[]).filter((r) => r.tag !== null).map((r) => [r.tag!.toLowerCase(), r.tag!]),
+    );
+    const { rules } = compileRules(defaultRules as Rule[], all);
+    const tagOf = (over: Partial<ParsedBankTxn>) => findRule(parsed({ details: 'TEST USER transfer', ...over }), rules)?.tagId;
+    it('сети и службы по имени получателя', () => {
+      expect(tagOf({ beneficiaryName: 'WINCOMMERCE JSC' })).toBe('Хотелки');
+      expect(tagOf({ beneficiaryName: 'HO KINH DOANH MINI MART TEST' })).toBe('Хотелки');
+      expect(tagOf({ beneficiaryName: 'VMS' })).toBe('Связь');
+      expect(tagOf({ beneficiaryName: 'PAYOO_PIZZA 4PS' })).toBe('Рестораны');
+      expect(tagOf({ beneficiaryName: 'NHA THUOC TEST_NGUYEN THI TEST' })).toBe('Здоровье');
+      expect(tagOf({ beneficiaryName: 'HO KINH DOANH TEST PET SHOP' })).toBe('Кошки');
+    });
+    it('магазин со смешанными покупками и платёжный шлюз — правило без категории', () => {
+      expect(findRule(parsed({ beneficiaryName: 'CTCP TM BACH HOA XANH' }), rules)).toMatchObject({ tagId: null });
+      expect(findRule(parsed({ beneficiaryName: 'BAOKIM CONG THANH TOAN', amount: 245000 }), rules)).toMatchObject({ tagId: null });
+      const r = toZenTransactions(parsed({ beneficiaryName: 'CTCP TM BACH HOA XANH' }), { ...ctx, rules });
+      expect(r.ok && r.txns[0]).toMatchObject({ tag: null, payee: 'Bach Hoa Xanh', originalPayee: 'CTCP TM BACH HOA XANH' });
+    });
+    it('физлицо, 140–450 тыс., сумма кратна 1000 — доставка еды', () => {
+      expect(tagOf({ beneficiaryName: 'NGUYEN VAN TEST', amount: 245000 })).toBe('Доставка еды');
+      expect(tagOf({ beneficiaryName: 'NGUYEN VAN TEST', amount: 245500 })).toBeUndefined();
+      expect(tagOf({ beneficiaryName: 'NGUYEN VAN TEST', amount: 74000 })).toBeUndefined();
+      expect(tagOf({ beneficiaryName: 'NGUYEN VAN TEST', amount: 450000 })).toBeUndefined();
+      expect(tagOf({ beneficiaryName: 'HO KINH DOANH TEST', amount: 245000 })).toBeUndefined();
+      expect(tagOf({ kind: 'income', remitter: 'NGUYEN VAN TEST', beneficiaryName: 'TEST USER', amount: 245000 })).toBeUndefined();
+    });
+    it('имена людей не срабатывают как магазины', () => {
+      for (const n of ['NGUYEN THU Y', 'LE VI', 'TRAN AN KHANG', 'STEVEN NGUYEN', 'PHAM KIM LONG']) {
+        expect(tagOf({ beneficiaryName: n, amount: 30000 })).toBeUndefined();
+      }
+    });
+  });
+
+  it('личное правило проверяется раньше встроенного', () => {
+    const { rules } = compileRules(
+      [{ match: 'nguyen van test', field: 'payee', tag: 'Связь' }, { match: '/./', field: 'payee', tag: 'Досуг', person: true }],
+      tags,
+    );
+    expect(findRule(parsed({ beneficiaryName: 'NGUYEN VAN TEST' }), rules)?.tagId).toBe('tag-tel');
+    expect(findRule(parsed({ beneficiaryName: 'TRAN VAN TEST' }), rules)?.tagId).toBe('tag-fun');
+  });
+
   it('маппер ставит категорию и подменяет получателя, originalPayee — как в письме', () => {
     const { rules } = compileRules(defaultRules as Rule[], tags);
     const r = toZenTransactions(evn, { ...ctx, rules });

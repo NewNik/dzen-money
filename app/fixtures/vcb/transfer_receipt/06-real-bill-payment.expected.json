@@ -1,0 +1,23 @@
+{
+  "source": "vcb-email",
+  "emailType": "transfer_receipt",
+  "gmailMessageId": "test",
+  "orderNumber": "10000000003",
+  "occurredAtLocal": "2026-11-07T16:45:00+07:00",
+  "dateLocal": "2026-11-07",
+  "amount": 3084912,
+  "currency": "VND",
+  "feeAmount": 0,
+  "debitAccount": "0000000000",
+  "creditAccount": "3333333333333",
+  "remitter": "TEST USER",
+  "beneficiaryName": "EVN Miền Trung",
+  "billCode": "PQ00000000001",
+  "details": "MBVCB10000000003_20261107_EVNCPC_PQ00000000001",
+  "kind": "expense",
+  "auth": {
+    "dkim": true,
+    "spf": true,
+    "dmarc": true
+  }
+}

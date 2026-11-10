@@ -64,14 +64,27 @@ var ZenApp = (() => {
     dateTime: ["Ngày, giờ giao dịch", "Trans. Date, Time"],
     orderNumber: ["Số lệnh giao dịch", "Order Number"],
     debitAccount: ["Tài khoản nguồn", "Debit Account"],
-    remitter: ["Tên người chuyển tiền", "Remitter's name"],
-    creditAccount: ["Tài khoản người hưởng", "Credit Account"],
+    remitter: ["Tên người chuyển tiền", "Tên tài khoản nguồn", "Remitter's name"],
+    creditAccount: [
+      "Tài khoản người hưởng",
+      "Tài khoản hưởng",
+      "Credit Account",
+      "Tài khoản/ Thẻ người hưởng",
+      "Credit Account/ Card",
+      "Số thẻ chuyển đến",
+      "Destination Card Number"
+    ],
+    // В переводе «на счёт/карту» Credit Account — виртуальный QR-счёт, настоящий номер — здесь.
+    accountNumber: ["Số tài khoản thụ hưởng", "Account number"],
+    billCode: ["Mã hóa đơn/Mã khách hàng", "Bill code/Customer code"],
     beneficiaryName: ["Tên người hưởng", "Beneficiary Name"],
     beneficiaryBank: ["Tên ngân hàng hưởng", "Beneficiary Bank Name"],
-    amount: ["Số tiền", "Amount"],
+    amount: ["Số tiền", "Amount", "Số tiền trích nợ", "Debit Amount"],
+    creditAmount: ["Số tiền ghi có", "Credit Amount"],
+    exchangeRate: ["Tỷ giá quy đổi", "Exchange Rate"],
     chargeCode: ["Loại phí", "Charge Code"],
-    chargeAmount: ["Số tiền phí", "Charge Amount"],
-    details: ["Nội dung chuyển tiền", "Details of Payment"]
+    chargeAmount: ["Số tiền phí", "Charge Amount", "Fee Amount"],
+    details: ["Nội dung chuyển tiền", "Nội dung chuyểntiền", "Nội dung thanh toán", "Details of Payment"]
   };
   var REQUIRED = ["dateTime", "orderNumber", "amount", "chargeAmount"];
   var key = (s) => normalizeText(s).toLowerCase().replace(/[’`]/g, "'");
@@ -81,6 +94,8 @@ var ZenApp = (() => {
     const colon = cell.indexOf(":");
     const head = colon >= 0 ? cell.slice(0, colon) : cell;
     const inline = colon >= 0 ? normalizeText(cell.slice(colon + 1)) : "";
+    const whole = LABEL_INDEX.get(key(head));
+    if (whole !== void 0) return { field: whole, inline };
     let field;
     for (const part of head.split("/")) {
       const f = LABEL_INDEX.get(key(part));
@@ -163,13 +178,19 @@ var ZenApp = (() => {
     if (!dt) return { ok: false, error: "не разобрана дата" };
     const amount = parseVcbAmount(f.amount);
     if (!amount || amount.amount <= 0) return { ok: false, error: "не разобрана сумма" };
+    if (f.creditAmount !== void 0) {
+      const credited = parseVcbAmount(f.creditAmount);
+      if (!credited || credited.amount !== amount.amount || credited.currency !== amount.currency) {
+        return { ok: false, error: "суммы списания и зачисления различаются" };
+      }
+    }
     const fee = parseVcbFee(runs.chargeAmount ?? []);
     if ("error" in fee) return { ok: false, error: fee.error };
     if (fee.amount > 0 && fee.currency !== amount.currency) return { ok: false, error: "валюта комиссии отличается" };
     const orderNumber = f.orderNumber.replace(/\s/g, "");
     if (!/^[A-Za-z0-9-]+$/.test(orderNumber)) return { ok: false, error: "не разобран Order Number" };
     const debitAccount = digits(f.debitAccount);
-    const creditAccount = digits(f.creditAccount);
+    const creditAccount = digits(f.accountNumber) ?? digits(f.creditAccount);
     return {
       ok: true,
       txn: {
@@ -186,6 +207,7 @@ var ZenApp = (() => {
         remitter: f.remitter,
         beneficiaryName: f.beneficiaryName,
         beneficiaryBank: f.beneficiaryBank,
+        billCode: f.billCode,
         details: f.details,
         kind: classify(debitAccount, creditAccount, ctx.ownAccounts),
         auth: ctx.auth
@@ -284,12 +306,12 @@ var ZenApp = (() => {
     const errors = [];
     rules.forEach((rule, i) => {
       const where = `правило ${i + 1} (${rule.match ?? "?"})`;
-      if (!rule || typeof rule.match !== "string" || !rule.match.trim() || typeof rule.tag !== "string") {
+      if (!rule || typeof rule.match !== "string" || !rule.match.trim() || typeof rule.tag !== "string" && rule.tag !== null) {
         errors.push(`${where}: нужны поля match и tag`);
         return;
       }
-      const tagId = tagsByTitle[tagKey(rule.tag)];
-      if (!tagId) {
+      const tagId = rule.tag === null ? null : tagsByTitle[tagKey(rule.tag)];
+      if (tagId === void 0) {
         errors.push(`${where}: нет категории «${rule.tag}» в Дзен-мани`);
         return;
       }
@@ -311,11 +333,24 @@ var ZenApp = (() => {
     });
     return { rules: out, errors };
   }
+  var BUSINESS = /(^| )(ho kinh doanh|hkd|cong ty|cty|ct cp|ctcp|tnhh|jsc|shop|store|mart|market|tiem|nha thuoc|nha hang|quan|food|cafe|coffee|momo|payoo|baokim|vnpay|evn|vms)( |$)|_/;
+  function looksLikePerson(name) {
+    const n = foldText(name ?? "");
+    return n !== "" && !BUSINESS.test(n);
+  }
+  function conditionsOk(rule, t) {
+    if (rule.amountMin !== void 0 && t.amount < rule.amountMin) return false;
+    if (rule.amountMax !== void 0 && t.amount >= rule.amountMax) return false;
+    if (rule.multipleOf !== void 0 && t.amount % rule.multipleOf !== 0) return false;
+    if (rule.person && !(t.kind === "expense" && looksLikePerson(t.beneficiaryName))) return false;
+    return true;
+  }
   function findRule(t, rules) {
     if (t.kind !== "expense" && t.kind !== "income") return void 0;
     const payee = foldText((t.kind === "expense" ? t.beneficiaryName : t.remitter) ?? "");
     const details = foldText(t.details ?? "");
     return rules.find(({ rule, test }) => {
+      if (!conditionsOk(rule, t)) return false;
       const f = rule.field ?? "any";
       return (f === "payee" || f === "any") && payee !== "" && test(payee) || (f === "details" || f === "any") && details !== "" && test(details);
     });
@@ -415,17 +450,31 @@ var ZenApp = (() => {
   var markerName = (comment) => /\[(vcb:[^\]]+)\]/.exec(comment ?? "")?.[1];
   var DAY = 864e5;
   var dayDiff = (a, b) => Math.abs(Date.parse(a) - Date.parse(b)) / DAY;
-  function sameSide(c, e) {
-    if (c.outcome > 0 && e.outcomeAccount === c.outcomeAccount && e.outcome === c.outcome) return true;
-    if (c.income > 0 && e.incomeAccount === c.incomeAccount && e.income === c.income) return true;
-    return false;
+  var fuzzyTolerance = (amount) => Math.max(1e3, amount * 0.03);
+  function sideDiff(c, e, own) {
+    const isExpense = c.outcome > 0 && c.income === 0;
+    const sameOut = e.outcomeAccount === c.outcomeAccount || isExpense && own.has(c.outcomeAccount) && own.has(e.outcomeAccount);
+    if (c.outcome > 0 && e.outcome > 0 && sameOut) return Math.abs(e.outcome - c.outcome);
+    if (c.income > 0 && e.income > 0 && e.incomeAccount === c.incomeAccount) return Math.abs(e.income - c.income);
+    return void 0;
   }
-  function planWrites(candidates, existing, redo = /* @__PURE__ */ new Set()) {
+  function planWrites(candidates, existing, redo = /* @__PURE__ */ new Set(), ownAccounts = /* @__PURE__ */ new Set()) {
     const byId = new Map(existing.map((e) => [e.id, e]));
     const aliveMarkers = new Set(existing.filter((e) => !e.deleted).map((e) => markerName(e.comment)).filter(Boolean));
     const manual = existing.filter((e) => !e.deleted && !(e.comment ?? "").includes("[vcb:"));
     const used = /* @__PURE__ */ new Set();
-    return candidates.map((txn) => {
+    const amountOf = (t) => t.outcome || t.income;
+    const findManual = (txn, fuzzy) => {
+      let best;
+      for (const m of manual) {
+        if (used.has(m.id) || dayDiff(m.date, txn.date) > 1) continue;
+        const diff = sideDiff(txn, m, ownAccounts);
+        if (diff === void 0 || (fuzzy ? diff === 0 || diff > fuzzyTolerance(amountOf(txn)) : diff !== 0)) continue;
+        if (!best || diff < best.diff) best = { m, diff };
+      }
+      return best?.m;
+    };
+    const first = candidates.map((txn) => {
       const e = byId.get(txn.id);
       const name = markerName(txn.comment);
       if (e && !e.deleted || name && aliveMarkers.has(name)) return { action: "exists", txn };
@@ -436,10 +485,20 @@ var ZenApp = (() => {
         return { action: "restore", txn: { ...txn, id: uuidv5(`${name}:r${n}`) } };
       }
       if (redo.has(txn.id)) return { action: "create", txn };
-      const match = manual.find((m) => !used.has(m.id) && dayDiff(m.date, txn.date) <= 1 && sameSide(txn, m));
+      const match = findManual(txn, false);
       if (match) {
         used.add(match.id);
-        return { action: "manual-duplicate", txn, match };
+        return { action: "manual-duplicate", txn, match, fuzzy: false };
+      }
+      return null;
+    });
+    return first.map((d, i) => {
+      if (d) return d;
+      const txn = candidates[i];
+      const match = /:fee\]/.test(txn.comment ?? "") ? void 0 : findManual(txn, true);
+      if (match) {
+        used.add(match.id);
+        return { action: "manual-duplicate", txn, match, fuzzy: true };
       }
       return { action: "create", txn };
     });
@@ -516,7 +575,7 @@ var ZenApp = (() => {
     const rule = findRule(t, ctx.rules ?? []);
     const main = {
       ...blank(ctx),
-      tag: rule ? [rule.tagId] : null,
+      tag: rule?.tagId ? [rule.tagId] : null,
       id: vcbTxnId(t.orderNumber),
       incomeInstrument: instrument,
       incomeAccount,
@@ -574,7 +633,8 @@ var ZenApp = (() => {
       mapped.push({ msgId, txns: r.txns });
     }
     const redo = new Set([...redoOrders].flatMap((o) => [vcbTxnId(o), vcbTxnId(o, true)]));
-    const decisions = planWrites(mapped.flatMap((m) => m.txns), existing, redo);
+    const own = new Set(Object.values(ctx.accounts));
+    const decisions = planWrites(mapped.flatMap((m) => m.txns), existing, redo, own);
     let k = 0;
     for (const m of mapped) {
       const ds = decisions.slice(k, k += m.txns.length);
@@ -584,7 +644,7 @@ var ZenApp = (() => {
         plans.set(m.msgId, {
           msgId: m.msgId,
           status: "duplicate",
-          reason: `похожая ручная операция ${dup.match.date} на ${amount} (id ${dup.match.id})`,
+          reason: `похожая ручная операция ${dup.match.date} на ${amount} (id ${dup.match.id})` + (dup.fuzzy ? " — сумма отличается, проверить" : ""),
           decisions: ds,
           creates: []
         });
@@ -606,8 +666,205 @@ var ZenApp = (() => {
 
   // config/rules.json
   var rules_default = [
-    { match: "/(^|[^a-z])evn/", tag: "Коммуналка", payee: "EVN (электричество)" },
-    { match: "/\\bcap nuoc\\b/", tag: "Коммуналка" }
+    {
+      match: "/(^|[^a-z])evn/",
+      tag: "Коммуналка",
+      payee: "EVN (электричество)"
+    },
+    {
+      match: "/\\bcap nuoc\\b/",
+      tag: "Коммуналка"
+    },
+    {
+      match: "/(?<![a-z0-9])(?:wincommerce|winmart|vinmart|win ?mart)/",
+      field: "payee",
+      tag: "Хотелки",
+      payee: "WinMart"
+    },
+    {
+      match: "/(?<![a-z0-9])(?:mini ?mart)/",
+      field: "payee",
+      tag: "Хотелки"
+    },
+    {
+      match: "/(?<![a-z0-9])(?:tiem banh)/",
+      field: "payee",
+      tag: "Продукты"
+    },
+    {
+      match: "/(?<![a-z0-9])(?:bach hoa xanh|bhx)/",
+      field: "payee",
+      tag: null,
+      payee: "Bach Hoa Xanh"
+    },
+    {
+      match: "/(?<![a-z0-9])(?:tien nha|thue nha|tien phong|thue phong|tien thue)/",
+      field: "payee",
+      tag: "Аренда"
+    },
+    {
+      match: "/(?<![a-z0-9])(?:dien luc|tien dien)/",
+      field: "payee",
+      tag: "Коммуналка"
+    },
+    {
+      match: "/(?<![a-z0-9])(?:cap thoat nuoc|tien nuoc|khawassco)/",
+      field: "payee",
+      tag: "Коммуналка"
+    },
+    {
+      match: "/(?<![a-z0-9])(?:phi quan ly|phi dich vu|phi ve sinh|tien rac)/",
+      field: "payee",
+      tag: "Коммуналка"
+    },
+    {
+      match: "/(?<![a-z0-9])(?:vms(?![a-z])|viettel|vinaphone|mobifone|vietnamobile|vnpt|fpt telecom|nap (tien )?dien thoai|nap the|top ?up|data [45]g|internet)/",
+      field: "payee",
+      tag: "Связь"
+    },
+    {
+      match: "/(?<![a-z0-9])(?:visa ?run|e-?visa|xuat nhap canh|immigration|lanh su)/",
+      field: "payee",
+      tag: "Бюрократия"
+    },
+    {
+      match: "/(?<![a-z0-9])(?:chatgpt|openai|claude|anthropic|cursor|copilot|figma|icons8|midjou?rney|telegram premium|yandex|netflix|spotify|youtube premium|icloud|google one|apple\\.com|glovo prime|shopee vip|phi thuong nien|phi quan ly tai khoan|phi sms|phi duy tri)/",
+      field: "payee",
+      tag: "Подписки"
+    },
+    {
+      match: "/(?<![a-z0-9])(?:pickle)/",
+      field: "payee",
+      tag: "Пиклбол"
+    },
+    {
+      match: "/(?<![a-z0-9])(?:cat ve sinh|cat litter)/",
+      field: "payee",
+      tag: "Наполнитель"
+    },
+    {
+      match: "/(?<![a-z0-9])(?:vet clinic)/",
+      field: "payee",
+      tag: "Ветеринария"
+    },
+    {
+      match: "/(?<![a-z0-9])(?:sheba|churu)/",
+      field: "payee",
+      tag: "Лакомства"
+    },
+    {
+      match: "/(?<![a-z0-9])(?:royal canin|whiskas)/",
+      field: "payee",
+      tag: "Корм"
+    },
+    {
+      match: "/(?<![a-z0-9])(?:pet ?shop|thu cung|pet mart|petmart)/",
+      field: "payee",
+      tag: "Кошки"
+    },
+    {
+      match: "/(?<![a-z0-9])(?:decathlon)/",
+      field: "payee",
+      tag: "Спорт"
+    },
+    {
+      match: "/(?<![a-z0-9])(?:massage|spa(?![a-z])|spf|sunscreen|barber|hair ?salon|guardian|watsons|hasaki|cocolux)/",
+      field: "payee",
+      tag: "Уход"
+    },
+    {
+      match: "/(?<![a-z0-9])(?:nha thuoc|pharmacity|pharmacy|nha khoa|dental|benh vien|phong kham|hospital|clinic)/",
+      field: "payee",
+      tag: "Здоровье"
+    },
+    {
+      match: "/(?<![a-z0-9])(?:vietjet|vietnam airlines|bamboo airways|airasia|agoda|booking|airbnb|traveloka|trip\\.com|hotel|khach san|homestay|hostel|duong sat|esim|futa|phuong trang|vexere)/",
+      field: "payee",
+      tag: "Путешествия"
+    },
+    {
+      match: "/(?<![a-z0-9])(?:cgv|lotte cinema|beta cinema|galaxy cinema|steam|vinpearl|vinwonders|karaoke|bowling)/",
+      field: "payee",
+      tag: "Развлечения"
+    },
+    {
+      match: "/(?<![a-z0-9])(?:taxi|xanh sm|be group|xang|petrolimex|pvoil|cay xang|rua xe|sua xe|parking|gui xe|giu xe|thue xe)/",
+      field: "payee",
+      tag: "Транспорт"
+    },
+    {
+      match: "/(?<![a-z0-9])(?:grab(?! ?food))/",
+      field: "payee",
+      tag: "Транспорт",
+      payee: "Grab",
+      amountMax: 1e5
+    },
+    {
+      match: "/(?<![a-z0-9])(?:grab)/",
+      field: "payee",
+      tag: "Доставка еды",
+      payee: "Grab",
+      amountMin: 1e5
+    },
+    {
+      match: "/(?<![a-z0-9])(?:grab ?food|shopee ?food|befood|baemin|gofood|pizza(?! ?4p)|sushi)/",
+      field: "payee",
+      tag: "Доставка еды"
+    },
+    {
+      match: "/(?<![a-z0-9])(?:pizza ?4p|burger king|kfc|lotteria|jollibee|mcdonald|bah?nh? mi|p burger|nha hang|restaurant|bistro|quan (an|com|pho|bun|nhau)|com (tam|ga|nieu)|pho (bo|ga)|bun (cha|bo)|egg bread)/",
+      field: "payee",
+      tag: "Рестораны"
+    },
+    {
+      match: "/(?<![a-z0-9])(?:pepsi|bubble tea|tra sua|mixue|highlands|phuc long|katinat|starbucks|the coffee house|cong ca ?phe|gs25|7-?eleven|ministop|family ?mart)/",
+      field: "payee",
+      tag: "Хотелки"
+    },
+    {
+      match: "/(?<![a-z0-9])(?:co\\.?op ?mart|co\\.?op ?food|lotte ?mart|big ?c|mega market|annam gourmet|top market|satra|sieu thi|tap hoa|trai cay|rau cu|thuc pham|nuoc(?! mam)|moon ?milk|cheadmarket|tomatoes)/",
+      field: "payee",
+      tag: "Продукты"
+    },
+    {
+      match: "/(?<![a-z0-9])(?:giat (ui|say|la)|laundry)/",
+      field: "payee",
+      tag: "Хозяйственные расходы"
+    },
+    {
+      match: "/(?<![a-z0-9])(?:jysk|ikea|noi that)/",
+      field: "payee",
+      tag: "Обстановка"
+    },
+    {
+      match: "/(?<![a-z0-9])(?:ssd|dien may xanh|dienmayxanh|the gioi di dong|thegioididong|tgdd|fpt shop|cellphones)/",
+      field: "payee",
+      tag: "Техника"
+    },
+    {
+      match: "/(?<![a-z0-9])(?:uniqlo)/",
+      field: "payee",
+      tag: "Одежда"
+    },
+    {
+      match: "/(?<![a-z0-9])(?:qua tang)/",
+      field: "payee",
+      tag: "Подарки"
+    },
+    {
+      match: "/(?<![a-z0-9])(?:shopee|lazada|tiktok ?shop|tiki(?![a-z])|shopeepay|baokim|payoo|momo|vnpay|zalopay|onepay)/",
+      field: "payee",
+      tag: null
+    },
+    {
+      match: "/./",
+      field: "payee",
+      tag: "Доставка еды",
+      person: true,
+      amountMin: 14e4,
+      amountMax: 45e4,
+      multipleOf: 1e3
+    }
   ];
 
   // src/core/notify.ts

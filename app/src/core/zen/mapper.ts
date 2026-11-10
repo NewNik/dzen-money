@@ -99,7 +99,7 @@ export function toZenTransactions(t: ParsedBankTxn, ctx: ZenContext): MapResult 
   const rule = findRule(t, ctx.rules ?? []);
   const main: ZenTransaction = {
     ...blank(ctx),
-    tag: rule ? [rule.tagId] : null,
+    tag: rule?.tagId ? [rule.tagId] : null,
     id: vcbTxnId(t.orderNumber),
     incomeInstrument: instrument,
     incomeAccount,
