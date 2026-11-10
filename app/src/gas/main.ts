@@ -14,6 +14,17 @@ import {
 import { formatDecision, planMessages } from '../core/zen/plan';
 import { compileRules, type CompiledRule, type Rule } from '../core/zen/rules';
 import defaultRules from '../../config/rules.json';
+import {
+  addStats,
+  buildRunMessage,
+  buildSummary,
+  throttle,
+  truncate,
+  txnLine,
+  type DayStats,
+  type EventKind,
+  type MsgEvent,
+} from '../core/notify';
 
 const L = {
   inbox: 'zen/inbox',
@@ -33,6 +44,11 @@ const BATCH = 30; // тредов за запуск
 const KEEP_IDS = 300; // сколько id обработанных писем помнить
 const MAX_RETRIES = 5; // сбоев Дзен-мани подряд, после которых письмо уходит в zen/error
 
+const TZ = 'Asia/Ho_Chi_Minh';
+const today = (): string => Utilities.formatDate(new Date(), TZ, 'yyyy-MM-dd');
+/** Ярлыки, которые ждут действий человека (для вечерней сводки). */
+const WAITING: (keyof typeof L)[] = ['duplicate', 'unparsed', 'quarantine', 'error'];
+
 const label = (name: string): GoogleAppsScript.Gmail.GmailLabel =>
   GmailApp.getUserLabelByName(name) ?? GmailApp.createLabel(name);
 
@@ -45,21 +61,66 @@ function accountsMap(props: GoogleAppsScript.Properties.Properties): Record<stri
 }
 
 /** Правила категорий: личные из свойства RULES (проверяются первыми), затем встроенные из config/rules.json. */
-function loadRules(props: GoogleAppsScript.Properties.Properties, tagsByTitle: Record<string, string>, tag: string): CompiledRule[] {
+function loadRules(
+  props: GoogleAppsScript.Properties.Properties,
+  tagsByTitle: Record<string, string>,
+  tag: string,
+): { rules: CompiledRule[]; errors: string[] } {
   let own: Rule[] = [];
+  const bad: string[] = [];
   const raw = props.getProperty('RULES');
   if (raw) {
     try {
       const v = JSON.parse(raw) as unknown;
       if (Array.isArray(v)) own = v as Rule[];
-      else console.error(`${tag} RULES: ожидался массив [...]`);
+      else bad.push('RULES: ожидался массив [...]');
     } catch (e) {
-      console.error(`${tag} RULES: неверный JSON — ${e instanceof Error ? e.message : String(e)}`);
+      bad.push(`RULES: неверный JSON — ${e instanceof Error ? e.message : String(e)}`);
     }
   }
   const { rules, errors } = compileRules([...own, ...(defaultRules as Rule[])], tagsByTitle);
-  for (const e of errors) console.error(`${tag} ${e}`);
-  return rules;
+  const all = [...bad, ...errors];
+  for (const e of all) console.error(`${tag} ${e}`);
+  return { rules, errors: all };
+}
+
+// --- Telegram ---
+
+/** Отправить сообщение. Без TG_TOKEN / TG_CHAT_ID — тихо пропустить. Сбой Telegram не ломает запуск. */
+function tgSend(props: GoogleAppsScript.Properties.Properties, text: string): boolean {
+  const token = props.getProperty('TG_TOKEN');
+  const chat = props.getProperty('TG_CHAT_ID');
+  if (!token || !chat) return false;
+  try {
+    const r = UrlFetchApp.fetch(`https://api.telegram.org/bot${token}/sendMessage`, {
+      method: 'post',
+      contentType: 'application/json',
+      payload: JSON.stringify({ chat_id: chat, text: truncate(text), disable_web_page_preview: true }),
+      muteHttpExceptions: true,
+    });
+    if (r.getResponseCode() !== 200) {
+      console.error(`Telegram: HTTP ${r.getResponseCode()} ${r.getContentText().slice(0, 200)}`);
+      return false;
+    }
+    return true;
+  } catch (e) {
+    console.error(`Telegram: ${e instanceof Error ? e.message : String(e)}`);
+    return false;
+  }
+}
+
+/** Системные проблемы с антиспамом: одна и та же — не чаще раза в 6 часов. */
+function throttled(props: GoogleAppsScript.Properties.Properties, items: { key: string; text: string }[]): string[] {
+  let state = JSON.parse(props.getProperty('ALERTS') ?? '{}') as Record<string, number>;
+  const now = Math.floor(Date.now() / 1000);
+  const out: string[] = [];
+  for (const it of items) {
+    const r = throttle(state, it.key, now);
+    state = r.state;
+    if (r.send) out.push(it.text);
+  }
+  if (items.length) props.setProperty('ALERTS', JSON.stringify(state));
+  return out;
 }
 
 const isWriteMode = (props: GoogleAppsScript.Properties.Properties): boolean =>
@@ -86,7 +147,15 @@ interface Msg {
   id: string;
   result: Result | null;
   txn?: ParsedBankTxn;
+  /** Строка операции для Telegram (txnLine, с категорией). */
+  line?: string;
+  reason?: string;
+  /** Операция создана в этом запуске (а не «уже была»). */
+  created?: boolean;
 }
+
+/** Системная проблема для Telegram: ключ для антиспама и текст. */
+type SysProblem = { key: string; text: string };
 
 /** Проверка дублей и (в режиме write) запись. Заполняет result у писем. Сбой Дзен-мани — исключение. */
 function syncToZen(
@@ -96,12 +165,14 @@ function syncToZen(
   write: boolean,
   tag: string,
   redo: ReadonlySet<string>,
+  sys: SysProblem[],
 ): void {
   const now = Math.floor(Date.now() / 1000);
   // Полная выгрузка (~2,5 МБ) только когда есть что записать: нужна для проверки дублей по всем операциям.
   const full = zenDiff(token, fullFetchRequest(now));
   const meta = readMeta(full);
-  const rules = loadRules(PropertiesService.getScriptProperties(), meta.tagsByTitle, tag);
+  const { rules, errors } = loadRules(PropertiesService.getScriptProperties(), meta.tagsByTitle, tag);
+  for (const e of errors) sys.push({ key: 'rules:' + e, text: `Правила категорий: ${e}` });
   const plans = planMessages(
     pending.map((m) => ({ msgId: m.id, txn: m.txn! })),
     { accounts, userId: meta.userId, instruments: meta.instruments, now, rules },
@@ -115,6 +186,10 @@ function syncToZen(
     for (const d of p.decisions) console.log(`${tag} msg=${p.msgId} ${formatDecision(d, meta.tagTitles)}`);
     if (p.reason) console.log(`${tag} msg=${p.msgId} ${p.status}: ${p.reason}`);
     const m = byId.get(p.msgId)!;
+    const main = p.decisions[0]?.txn;
+    const category = main?.tag?.length ? main.tag.map((id) => meta.tagTitles[id] ?? id).join(', ') : undefined;
+    m.line = txnLine(m.txn!, category);
+    m.reason = p.reason;
     m.result =
       p.status === 'done' ? 'done'
       : p.status === 'duplicate' ? 'duplicate'
@@ -130,7 +205,10 @@ function syncToZen(
   const missing = new Set(missingAfterWrite(resp, txns.map((t) => t.id)));
   for (const p of toCreate) {
     const lost = p.creates.filter((t) => missing.has(t.id));
-    byId.get(p.msgId)!.result = lost.length ? 'error' : 'done';
+    const m = byId.get(p.msgId)!;
+    m.result = lost.length ? 'error' : 'done';
+    m.created = !lost.length;
+    if (lost.length) m.reason = 'Дзен-мани не подтвердил запись — см. журнал';
     console.log(`${tag} msg=${p.msgId} ${lost.length ? 'НЕ подтверждено сервером: ' + lost.map((t) => t.id).join(', ') : 'записано'}`);
   }
 }
@@ -176,7 +254,11 @@ export function run(): void {
             continue;
           }
           console.log(`${tag} ${formatLog(id, out)}`);
-          msgs.push(out.status === 'parsed' ? { thread: i, id, result: null, txn: out.txn } : { thread: i, id, result: out.status });
+          msgs.push(
+            out.status === 'parsed'
+              ? { thread: i, id, result: null, txn: out.txn, line: txnLine(out.txn) }
+              : { thread: i, id, result: out.status, reason: out.reason },
+          );
         }
       } catch (e) {
         console.error(`ошибка в треде ${thread.getId()}: ${e instanceof Error ? e.stack : String(e)}`);
@@ -184,23 +266,28 @@ export function run(): void {
       }
     });
 
+    const sys: SysProblem[] = [];
     const pending = msgs.filter((m) => m.txn);
     const retryThreads = new Set<number>(); // оставить в zen/inbox до следующего запуска
     if (pending.length) {
       const token = props.getProperty('ZEN_TOKEN');
       if (!token) {
         console.error(`${tag} не задано свойство ZEN_TOKEN — проверить дубли и записать нельзя`);
+        sys.push({ key: 'no-token', text: 'Не задано свойство ZEN_TOKEN — записать в Дзен-мани нельзя.' });
         pending.forEach((m) => (m.result = 'error'));
       } else {
         try {
-          syncToZen(pending, accounts, token, write, tag, redo);
+          syncToZen(pending, accounts, token, write, tag, redo, sys);
           pending.forEach((m) => delete retries[m.id]);
         } catch (e) {
-          console.error(`${tag} сбой Дзен-мани: ${e instanceof Error ? e.message : String(e)}`);
+          const text = e instanceof Error ? e.message : String(e);
+          console.error(`${tag} сбой Дзен-мани: ${text}`);
+          if (text.includes('401')) sys.push({ key: 'zen-401', text: 'Дзен-мани отвечает 401: токен ZEN_TOKEN недействителен, нужен новый.' });
           for (const m of pending) {
             const n = (retries[m.id] ?? 0) + 1;
             if (n >= MAX_RETRIES) {
               m.result = 'error';
+              m.reason = `Дзен-мани недоступен ${MAX_RETRIES} раз подряд: ${text.slice(0, 150)}`;
               delete retries[m.id];
             } else {
               m.result = null;
@@ -237,6 +324,26 @@ export function run(): void {
       else props.deleteProperty('REDO');
       console.log(`${tag} REDO выполнено: ${doneRedo.join(', ')}`);
     }
+
+    // --- статистика и Telegram ---
+    const events: MsgEvent[] = [];
+    for (const m of msgs) {
+      if (!m.result || (m.result === 'done' && !m.created)) continue; // «уже было записано» — не событие
+      const kind: EventKind = m.result === 'done' ? 'written' : m.result;
+      events.push({ kind, msgId: m.id, line: m.line, reason: m.reason });
+    }
+    threads.forEach((thread, i) => {
+      if (broken.has(i)) events.push({ kind: 'error', msgId: thread.getId(), reason: 'исключение при разборе — см. журнал' });
+    });
+    const day = today();
+    const txns = new Map(msgs.filter((m) => m.txn).map((m) => [m.id, m.txn!]));
+    const stats = addStats(JSON.parse(props.getProperty('STATS') ?? '{}') as Record<string, DayStats>, day, events, txns);
+    props.setProperty('STATS', JSON.stringify(stats));
+    if (msgs.some((m) => m.result !== 'quarantine')) props.setProperty('LAST_BANK_DAY', day);
+
+    const notifyAll = (props.getProperty('TG_NOTIFY') ?? 'all').trim().toLowerCase() !== 'problems';
+    const text = buildRunMessage(events, throttled(props, sys), notifyAll);
+    if (text) tgSend(props, text);
   } finally {
     lock.releaseLock();
   }
@@ -258,7 +365,7 @@ export function checkZen(): void {
   for (const [num, uuid] of Object.entries(accountsMap(props))) {
     console.log(`${maskAccount(num)} → ${uuid}: ${meta.accountIds.has(uuid) ? 'счёт найден' : 'НЕТ такого счёта (или он в архиве)'}`);
   }
-  const rules = loadRules(props, meta.tagsByTitle, '[rules]');
+  const { rules } = loadRules(props, meta.tagsByTitle, '[rules]');
   console.log(`Правил категорий: ${rules.length} (ошибки, если есть, — строками выше).`);
   console.log(`Режим: ${isWriteMode(props) ? 'write — запись включена' : 'dry-run — запись выключена'}.`);
 }
@@ -268,14 +375,54 @@ export function install(): void {
   (Object.keys(L) as (keyof typeof L)[]).forEach((k) => label(L[k]));
   uninstall();
   ScriptApp.newTrigger('run').timeBased().everyMinutes(5).create();
-  console.log('Метки созданы, таймер установлен (каждые 5 минут).');
+  ScriptApp.newTrigger('dailySummary').timeBased().atHour(21).everyDays(1).inTimezone(TZ).create();
+  console.log('Метки созданы, таймеры установлены: run — каждые 5 минут, dailySummary — в 21:00 (Вьетнам).');
 }
 
-/** Удаляет таймер. */
+/** Удаляет таймеры. */
 export function uninstall(): void {
   for (const t of ScriptApp.getProjectTriggers()) {
-    if (t.getHandlerFunction() === 'run') ScriptApp.deleteTrigger(t);
+    if (t.getHandlerFunction() === 'run' || t.getHandlerFunction() === 'dailySummary') ScriptApp.deleteTrigger(t);
   }
+}
+
+/** Вечерняя сводка в Telegram (таймер в 21:00). Можно запустить вручную. */
+export function dailySummary(): void {
+  const props = PropertiesService.getScriptProperties();
+  const day = today();
+  const stats = JSON.parse(props.getProperty('STATS') ?? '{}') as Record<string, DayStats>;
+  const waiting: Record<string, number> = {};
+  for (const k of WAITING) waiting[L[k]] = label(L[k]).getThreads(0, 100).length;
+  const text = buildSummary(day, stats[day], waiting, props.getProperty('LAST_BANK_DAY') ?? undefined, isWriteMode(props));
+  console.log(text);
+  if (!tgSend(props, text)) console.log('В Telegram не отправлено: нет TG_TOKEN / TG_CHAT_ID или ошибка (см. выше).');
+}
+
+/**
+ * Настройка Telegram: после TG_TOKEN написать боту любое сообщение и запустить эту функцию.
+ * Находит чат по последнему сообщению боту и сохраняет TG_CHAT_ID.
+ */
+export function tgSetup(): void {
+  const props = PropertiesService.getScriptProperties();
+  const token = props.getProperty('TG_TOKEN');
+  if (!token) {
+    console.error('Не задано свойство TG_TOKEN (токен от @BotFather).');
+    return;
+  }
+  const r = UrlFetchApp.fetch(`https://api.telegram.org/bot${token}/getUpdates`, { muteHttpExceptions: true });
+  if (r.getResponseCode() !== 200) {
+    console.error(`Telegram: HTTP ${r.getResponseCode()} — проверьте TG_TOKEN. ${r.getContentText().slice(0, 200)}`);
+    return;
+  }
+  const updates = (JSON.parse(r.getContentText()) as { result?: { message?: { chat?: { id: number; type: string } } }[] }).result ?? [];
+  const chat = updates.map((u) => u.message?.chat).filter((c) => c !== undefined).pop();
+  if (!chat) {
+    console.error('Боту ещё никто не писал. Откройте бота в Telegram, нажмите «Start» или отправьте любое сообщение и запустите tgSetup снова.');
+    return;
+  }
+  props.setProperty('TG_CHAT_ID', String(chat.id));
+  console.log(`TG_CHAT_ID = ${chat.id} (${chat.type}) сохранён.`);
+  tgSend(props, '✅ dzen-money подключён. Сюда будут приходить записи, проблемы и сводка в 21:00.');
 }
 
 /**

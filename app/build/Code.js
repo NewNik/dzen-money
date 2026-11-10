@@ -23,9 +23,11 @@ var ZenApp = (() => {
   var main_exports = {};
   __export(main_exports, {
     checkZen: () => checkZen,
+    dailySummary: () => dailySummary,
     dumpSample: () => dumpSample,
     install: () => install,
     run: () => run,
+    tgSetup: () => tgSetup,
     uninstall: () => uninstall
   });
 
@@ -608,6 +610,104 @@ var ZenApp = (() => {
     { match: "/\\bcap nuoc\\b/", tag: "Коммуналка" }
   ];
 
+  // src/core/notify.ts
+  var fmtAmount = (n) => String(n).replace(/\B(?=(\d{3})+(?!\d))/g, " ");
+  var fmtDay = (iso) => `${iso.slice(8, 10)}.${iso.slice(5, 7)}`;
+  function txnLine(t, category) {
+    const sign = t.kind === "income" ? "+" : t.kind === "transfer" ? "⇄ " : "−";
+    const acc = t.kind === "income" ? maskAccount(t.creditAccount) : t.kind === "transfer" ? `${maskAccount(t.debitAccount)} → ${maskAccount(t.creditAccount)}` : maskAccount(t.debitAccount);
+    const fee = t.feeAmount > 0 ? ` (+ комиссия ${fmtAmount(t.feeAmount)})` : "";
+    return [`${fmtDay(t.dateLocal)} ${sign}${fmtAmount(t.amount)} ${t.currency}${fee}`, category ?? "без категории", acc].join(" · ");
+  }
+  var gmailLink = (msgId) => `https://mail.google.com/mail/u/0/#all/${msgId}`;
+  var ICON = {
+    written: "✅",
+    dryrun: "🧪",
+    duplicate: "👯",
+    unparsed: "❓",
+    quarantine: "🚫",
+    error: "❌"
+  };
+  var TITLE = {
+    written: "записано",
+    dryrun: "dry-run, не записано",
+    duplicate: "похоже на ручной ввод — не записано",
+    unparsed: "не разобрано",
+    quarantine: "карантин",
+    error: "ошибка"
+  };
+  var PROBLEMS = /* @__PURE__ */ new Set(["duplicate", "unparsed", "quarantine", "error"]);
+  function buildRunMessage(events, system, notifyAll) {
+    const shown = events.filter((e) => notifyAll || PROBLEMS.has(e.kind));
+    if (!shown.length && !system.length) return null;
+    const bad = system.length > 0 || shown.some((e) => PROBLEMS.has(e.kind));
+    const out = [bad ? "⚠️ Дзен-мани: нужно внимание" : "Дзен-мани"];
+    for (const s of system) out.push(`❗ ${s}`);
+    for (const e of shown) {
+      const parts = [`${ICON[e.kind]} ${e.line ?? TITLE[e.kind]}`];
+      if (e.line && e.kind !== "written") parts.push(`   ${TITLE[e.kind]}`);
+      if (e.reason) parts.push(`   ${e.reason}`);
+      if (PROBLEMS.has(e.kind)) parts.push(`   ${gmailLink(e.msgId)}`);
+      out.push(parts.join("\n"));
+    }
+    return truncate(out.join("\n"));
+  }
+  var truncate = (s, max = 4e3) => s.length <= max ? s : s.slice(0, max - 20) + "\n… (обрезано)";
+  var emptyDay = () => ({
+    written: 0,
+    dryrun: 0,
+    duplicate: 0,
+    unparsed: 0,
+    quarantine: 0,
+    error: 0,
+    outcome: {},
+    income: {}
+  });
+  var KEEP_DAYS = 14;
+  function addStats(stats, day, events, txns) {
+    const d = { ...emptyDay(), ...stats[day] };
+    for (const e of events) {
+      d[e.kind]++;
+      const t = txns.get(e.msgId);
+      if (e.kind !== "written" || !t) continue;
+      const add = (bucket) => bucket[t.currency] = (bucket[t.currency] ?? 0) + t.amount + t.feeAmount;
+      if (t.kind === "expense") add(d.outcome);
+      if (t.kind === "income") add(d.income);
+    }
+    const out = { ...stats, [day]: d };
+    for (const k of Object.keys(out).sort().slice(0, -KEEP_DAYS)) delete out[k];
+    return out;
+  }
+  var DAY_MS = 864e5;
+  var daysBetween = (fromIso, toIso) => Math.round((Date.parse(toIso) - Date.parse(fromIso)) / DAY_MS);
+  var sums = (b) => Object.entries(b).map(([cur, n]) => `${fmtAmount(n)} ${cur}`).join(", ");
+  function buildSummary(today2, d, waiting, lastBankDay, write) {
+    const s = d ?? emptyDay();
+    const out = [`📊 Дзен-мани · ${fmtDay(today2)}${write ? "" : " · режим dry-run"}`];
+    const spent = sums(s.outcome);
+    const got = sums(s.income);
+    out.push(`Записано операций: ${s.written}${spent ? ` · расходы ${spent}` : ""}${got ? ` · доходы ${got}` : ""}`);
+    if (s.dryrun) out.push(`dry-run (не записано): ${s.dryrun}`);
+    const probs = ["duplicate", "unparsed", "quarantine", "error"].filter((k) => s[k]).map((k) => `${TITLE[k]}: ${s[k]}`);
+    if (probs.length) out.push(`За день: ${probs.join("; ")}`);
+    const wait = Object.entries(waiting).filter(([, n]) => n > 0);
+    if (wait.length) out.push(`Ждут проверки в Gmail: ${wait.map(([l, n]) => `${l} — ${n}`).join(", ")} (после проверки снять ярлык)`);
+    if (!lastBankDay) out.push("⚠️ Писем от банка ещё не было.");
+    else {
+      const n = daysBetween(lastBankDay, today2);
+      if (n >= 3) out.push(`⚠️ Писем от банка не было ${n} дн. (последнее ${fmtDay(lastBankDay)}) — проверить фильтр и пересылку.`);
+    }
+    return truncate(out.join("\n"));
+  }
+  function throttle(state, key2, nowSec, hours = 6) {
+    const last = state[key2];
+    if (last !== void 0 && nowSec - last < hours * 3600) return { send: false, state };
+    const next = {};
+    for (const [k, t] of Object.entries(state)) if (nowSec - t < 7 * 86400) next[k] = t;
+    next[key2] = nowSec;
+    return { send: true, state: next };
+  }
+
   // src/gas/main.ts
   var L = {
     inbox: "zen/inbox",
@@ -628,6 +728,9 @@ var ZenApp = (() => {
   var BATCH = 30;
   var KEEP_IDS = 300;
   var MAX_RETRIES = 5;
+  var TZ = "Asia/Ho_Chi_Minh";
+  var today = () => Utilities.formatDate(/* @__PURE__ */ new Date(), TZ, "yyyy-MM-dd");
+  var WAITING = ["duplicate", "unparsed", "quarantine", "error"];
   var label = (name) => GmailApp.getUserLabelByName(name) ?? GmailApp.createLabel(name);
   function accountsMap(props) {
     const raw = props.getProperty("ACCOUNTS");
@@ -637,19 +740,54 @@ var ZenApp = (() => {
   }
   function loadRules(props, tagsByTitle, tag) {
     let own = [];
+    const bad = [];
     const raw = props.getProperty("RULES");
     if (raw) {
       try {
         const v = JSON.parse(raw);
         if (Array.isArray(v)) own = v;
-        else console.error(`${tag} RULES: ожидался массив [...]`);
+        else bad.push("RULES: ожидался массив [...]");
       } catch (e) {
-        console.error(`${tag} RULES: неверный JSON — ${e instanceof Error ? e.message : String(e)}`);
+        bad.push(`RULES: неверный JSON — ${e instanceof Error ? e.message : String(e)}`);
       }
     }
     const { rules, errors } = compileRules([...own, ...rules_default], tagsByTitle);
-    for (const e of errors) console.error(`${tag} ${e}`);
-    return rules;
+    const all = [...bad, ...errors];
+    for (const e of all) console.error(`${tag} ${e}`);
+    return { rules, errors: all };
+  }
+  function tgSend(props, text) {
+    const token = props.getProperty("TG_TOKEN");
+    const chat = props.getProperty("TG_CHAT_ID");
+    if (!token || !chat) return false;
+    try {
+      const r = UrlFetchApp.fetch(`https://api.telegram.org/bot${token}/sendMessage`, {
+        method: "post",
+        contentType: "application/json",
+        payload: JSON.stringify({ chat_id: chat, text: truncate(text), disable_web_page_preview: true }),
+        muteHttpExceptions: true
+      });
+      if (r.getResponseCode() !== 200) {
+        console.error(`Telegram: HTTP ${r.getResponseCode()} ${r.getContentText().slice(0, 200)}`);
+        return false;
+      }
+      return true;
+    } catch (e) {
+      console.error(`Telegram: ${e instanceof Error ? e.message : String(e)}`);
+      return false;
+    }
+  }
+  function throttled(props, items) {
+    let state = JSON.parse(props.getProperty("ALERTS") ?? "{}");
+    const now = Math.floor(Date.now() / 1e3);
+    const out = [];
+    for (const it of items) {
+      const r = throttle(state, it.key, now);
+      state = r.state;
+      if (r.send) out.push(it.text);
+    }
+    if (items.length) props.setProperty("ALERTS", JSON.stringify(state));
+    return out;
   }
   var isWriteMode = (props) => (props.getProperty("MODE") ?? "").trim().toLowerCase() === "write";
   function zenDiff(token, body) {
@@ -666,11 +804,12 @@ var ZenApp = (() => {
     if (code !== 200) throw new Error(`Дзен-мани: HTTP ${code} ${r.getContentText().slice(0, 200)}`);
     return JSON.parse(r.getContentText());
   }
-  function syncToZen(pending, accounts, token, write, tag, redo) {
+  function syncToZen(pending, accounts, token, write, tag, redo, sys) {
     const now = Math.floor(Date.now() / 1e3);
     const full = zenDiff(token, fullFetchRequest(now));
     const meta = readMeta(full);
-    const rules = loadRules(PropertiesService.getScriptProperties(), meta.tagsByTitle, tag);
+    const { rules, errors } = loadRules(PropertiesService.getScriptProperties(), meta.tagsByTitle, tag);
+    for (const e of errors) sys.push({ key: "rules:" + e, text: `Правила категорий: ${e}` });
     const plans = planMessages(
       pending.map((m) => ({ msgId: m.id, txn: m.txn })),
       { accounts, userId: meta.userId, instruments: meta.instruments, now, rules },
@@ -683,6 +822,10 @@ var ZenApp = (() => {
       for (const d of p.decisions) console.log(`${tag} msg=${p.msgId} ${formatDecision(d, meta.tagTitles)}`);
       if (p.reason) console.log(`${tag} msg=${p.msgId} ${p.status}: ${p.reason}`);
       const m = byId.get(p.msgId);
+      const main = p.decisions[0]?.txn;
+      const category = main?.tag?.length ? main.tag.map((id) => meta.tagTitles[id] ?? id).join(", ") : void 0;
+      m.line = txnLine(m.txn, category);
+      m.reason = p.reason;
       m.result = p.status === "done" ? "done" : p.status === "duplicate" ? "duplicate" : p.status === "unmapped" ? "unparsed" : write ? null : "dryrun";
     }
     const toCreate = plans.filter((p) => p.status === "create");
@@ -692,7 +835,10 @@ var ZenApp = (() => {
     const missing = new Set(missingAfterWrite(resp, txns.map((t) => t.id)));
     for (const p of toCreate) {
       const lost = p.creates.filter((t) => missing.has(t.id));
-      byId.get(p.msgId).result = lost.length ? "error" : "done";
+      const m = byId.get(p.msgId);
+      m.result = lost.length ? "error" : "done";
+      m.created = !lost.length;
+      if (lost.length) m.reason = "Дзен-мани не подтвердил запись — см. журнал";
       console.log(`${tag} msg=${p.msgId} ${lost.length ? "НЕ подтверждено сервером: " + lost.map((t) => t.id).join(", ") : "записано"}`);
     }
   }
@@ -730,30 +876,37 @@ var ZenApp = (() => {
               continue;
             }
             console.log(`${tag} ${formatLog(id, out)}`);
-            msgs.push(out.status === "parsed" ? { thread: i, id, result: null, txn: out.txn } : { thread: i, id, result: out.status });
+            msgs.push(
+              out.status === "parsed" ? { thread: i, id, result: null, txn: out.txn, line: txnLine(out.txn) } : { thread: i, id, result: out.status, reason: out.reason }
+            );
           }
         } catch (e) {
           console.error(`ошибка в треде ${thread.getId()}: ${e instanceof Error ? e.stack : String(e)}`);
           broken.add(i);
         }
       });
+      const sys = [];
       const pending = msgs.filter((m) => m.txn);
       const retryThreads = /* @__PURE__ */ new Set();
       if (pending.length) {
         const token = props.getProperty("ZEN_TOKEN");
         if (!token) {
           console.error(`${tag} не задано свойство ZEN_TOKEN — проверить дубли и записать нельзя`);
+          sys.push({ key: "no-token", text: "Не задано свойство ZEN_TOKEN — записать в Дзен-мани нельзя." });
           pending.forEach((m) => m.result = "error");
         } else {
           try {
-            syncToZen(pending, accounts, token, write, tag, redo);
+            syncToZen(pending, accounts, token, write, tag, redo, sys);
             pending.forEach((m) => delete retries[m.id]);
           } catch (e) {
-            console.error(`${tag} сбой Дзен-мани: ${e instanceof Error ? e.message : String(e)}`);
+            const text2 = e instanceof Error ? e.message : String(e);
+            console.error(`${tag} сбой Дзен-мани: ${text2}`);
+            if (text2.includes("401")) sys.push({ key: "zen-401", text: "Дзен-мани отвечает 401: токен ZEN_TOKEN недействителен, нужен новый." });
             for (const m of pending) {
               const n = (retries[m.id] ?? 0) + 1;
               if (n >= MAX_RETRIES) {
                 m.result = "error";
+                m.reason = `Дзен-мани недоступен ${MAX_RETRIES} раз подряд: ${text2.slice(0, 150)}`;
                 delete retries[m.id];
               } else {
                 m.result = null;
@@ -787,6 +940,23 @@ var ZenApp = (() => {
         else props.deleteProperty("REDO");
         console.log(`${tag} REDO выполнено: ${doneRedo.join(", ")}`);
       }
+      const events = [];
+      for (const m of msgs) {
+        if (!m.result || m.result === "done" && !m.created) continue;
+        const kind = m.result === "done" ? "written" : m.result;
+        events.push({ kind, msgId: m.id, line: m.line, reason: m.reason });
+      }
+      threads.forEach((thread, i) => {
+        if (broken.has(i)) events.push({ kind: "error", msgId: thread.getId(), reason: "исключение при разборе — см. журнал" });
+      });
+      const day = today();
+      const txns = new Map(msgs.filter((m) => m.txn).map((m) => [m.id, m.txn]));
+      const stats = addStats(JSON.parse(props.getProperty("STATS") ?? "{}"), day, events, txns);
+      props.setProperty("STATS", JSON.stringify(stats));
+      if (msgs.some((m) => m.result !== "quarantine")) props.setProperty("LAST_BANK_DAY", day);
+      const notifyAll = (props.getProperty("TG_NOTIFY") ?? "all").trim().toLowerCase() !== "problems";
+      const text = buildRunMessage(events, throttled(props, sys), notifyAll);
+      if (text) tgSend(props, text);
     } finally {
       lock.releaseLock();
     }
@@ -806,7 +976,7 @@ var ZenApp = (() => {
     for (const [num, uuid] of Object.entries(accountsMap(props))) {
       console.log(`${maskAccount(num)} → ${uuid}: ${meta.accountIds.has(uuid) ? "счёт найден" : "НЕТ такого счёта (или он в архиве)"}`);
     }
-    const rules = loadRules(props, meta.tagsByTitle, "[rules]");
+    const { rules } = loadRules(props, meta.tagsByTitle, "[rules]");
     console.log(`Правил категорий: ${rules.length} (ошибки, если есть, — строками выше).`);
     console.log(`Режим: ${isWriteMode(props) ? "write — запись включена" : "dry-run — запись выключена"}.`);
   }
@@ -814,12 +984,45 @@ var ZenApp = (() => {
     Object.keys(L).forEach((k) => label(L[k]));
     uninstall();
     ScriptApp.newTrigger("run").timeBased().everyMinutes(5).create();
-    console.log("Метки созданы, таймер установлен (каждые 5 минут).");
+    ScriptApp.newTrigger("dailySummary").timeBased().atHour(21).everyDays(1).inTimezone(TZ).create();
+    console.log("Метки созданы, таймеры установлены: run — каждые 5 минут, dailySummary — в 21:00 (Вьетнам).");
   }
   function uninstall() {
     for (const t of ScriptApp.getProjectTriggers()) {
-      if (t.getHandlerFunction() === "run") ScriptApp.deleteTrigger(t);
+      if (t.getHandlerFunction() === "run" || t.getHandlerFunction() === "dailySummary") ScriptApp.deleteTrigger(t);
     }
+  }
+  function dailySummary() {
+    const props = PropertiesService.getScriptProperties();
+    const day = today();
+    const stats = JSON.parse(props.getProperty("STATS") ?? "{}");
+    const waiting = {};
+    for (const k of WAITING) waiting[L[k]] = label(L[k]).getThreads(0, 100).length;
+    const text = buildSummary(day, stats[day], waiting, props.getProperty("LAST_BANK_DAY") ?? void 0, isWriteMode(props));
+    console.log(text);
+    if (!tgSend(props, text)) console.log("В Telegram не отправлено: нет TG_TOKEN / TG_CHAT_ID или ошибка (см. выше).");
+  }
+  function tgSetup() {
+    const props = PropertiesService.getScriptProperties();
+    const token = props.getProperty("TG_TOKEN");
+    if (!token) {
+      console.error("Не задано свойство TG_TOKEN (токен от @BotFather).");
+      return;
+    }
+    const r = UrlFetchApp.fetch(`https://api.telegram.org/bot${token}/getUpdates`, { muteHttpExceptions: true });
+    if (r.getResponseCode() !== 200) {
+      console.error(`Telegram: HTTP ${r.getResponseCode()} — проверьте TG_TOKEN. ${r.getContentText().slice(0, 200)}`);
+      return;
+    }
+    const updates = JSON.parse(r.getContentText()).result ?? [];
+    const chat = updates.map((u) => u.message?.chat).filter((c) => c !== void 0).pop();
+    if (!chat) {
+      console.error("Боту ещё никто не писал. Откройте бота в Telegram, нажмите «Start» или отправьте любое сообщение и запустите tgSetup снова.");
+      return;
+    }
+    props.setProperty("TG_CHAT_ID", String(chat.id));
+    console.log(`TG_CHAT_ID = ${chat.id} (${chat.type}) сохранён.`);
+    tgSend(props, "✅ dzen-money подключён. Сюда будут приходить записи, проблемы и сводка в 21:00.");
   }
   function dumpSample() {
     const thread = GmailApp.search("from:" + VCB_SENDER, 0, 1)[0];
@@ -838,6 +1041,8 @@ var ZenApp = (() => {
 
 function run() { return ZenApp.run(); }
 function checkZen() { return ZenApp.checkZen(); }
+function tgSetup() { return ZenApp.tgSetup(); }
+function dailySummary() { return ZenApp.dailySummary(); }
 function install() { return ZenApp.install(); }
 function uninstall() { return ZenApp.uninstall(); }
 function dumpSample() { return ZenApp.dumpSample(); }
