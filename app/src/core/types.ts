@@ -45,7 +45,6 @@ export interface ZenTransaction {
   originalPayee: string | null;
   comment: string | null;
   date: string; // yyyy-MM-dd
-  mcc: number | null;
   reminderMarker: string | null;
   opIncome: number | null;
   opIncomeInstrument: number | null;
@@ -53,6 +52,12 @@ export interface ZenTransaction {
   opOutcomeInstrument: number | null;
   latitude: number | null;
   longitude: number | null;
+  // поля из фактического ответа API (в wiki не описаны)
+  incomeBankID: string | null;
+  outcomeBankID: string | null;
+  qrCode: string | null;
+  source: string | null;
+  viewed: boolean;
 }
 
 export interface ZenDiffRequest {
