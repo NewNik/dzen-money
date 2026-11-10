@@ -1,0 +1,17 @@
+ОБЕЗЛИЧЕННЫЙ образец (текст письма, значения заменены)
+
+From: VCBDigibank@info.vietcombank.com.vn
+Subject: Biên lai chuyển tiền qua tài khoản
+
+Biên lai chuyển tiền qua tài khoản (Payment Receipt)
+Ngày, giờ giao dịch / Trans. Date, Time:      10:57 Sunday 08/11/2026
+Số lệnh giao dịch / Order Number:             00000000001
+Tài khoản nguồn / Debit Account:              0000000000
+Tên người chuyển tiền / Remitter's name:      TEST USER
+Tài khoản người hưởng / Credit Account:       111111111111
+Tên người hưởng / Beneficiary Name:           TEST SHOP
+Tên ngân hàng hưởng / Beneficiary Bank Name:  The Maritime Commercial Joint Stock Bank
+Số tiền / Amount:                             74,000 VND
+Loại phí / Charge Code:                       Người chuyển trả / Exclude
+Số tiền phí / Charge Amount:                  0 VND
+Nội dung chuyển tiền / Details of Payment:    TEST USER transfer

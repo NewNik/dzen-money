@@ -1,0 +1,8 @@
+node_modules/
+dist/
+.env
+.clasprc.json
+app/config/*.json
+!app/config/*.example.json
+*.eml
+.DS_Store
