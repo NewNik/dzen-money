@@ -1,0 +1,19 @@
+{
+  "source": "vcb-email",
+  "emailType": "transfer_receipt",
+  "gmailMessageId": "test",
+  "orderNumber": "00000000001",
+  "occurredAtLocal": "2026-11-08T10:57:00+07:00",
+  "dateLocal": "2026-11-08",
+  "amount": 74000,
+  "currency": "VND",
+  "feeAmount": 0,
+  "debitAccount": "0000000000",
+  "creditAccount": "111111111111",
+  "remitter": "TEST USER",
+  "beneficiaryName": "TEST SHOP",
+  "beneficiaryBank": "The Maritime Commercial Joint Stock Bank",
+  "details": "TEST USER transfer",
+  "kind": "expense",
+  "auth": { "dkim": true, "spf": true, "dmarc": true }
+}

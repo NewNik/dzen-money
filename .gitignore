@@ -6,7 +6,4 @@ app/config/*.json
 !app/config/*.example.json
 *.eml
 .DS_Store
-!app/config/category-rules.json
-*.mbox
-*.mbox.zip
-takeout*/
+.clasp.json

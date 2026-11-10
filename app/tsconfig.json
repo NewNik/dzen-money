@@ -6,18 +6,7 @@
     "strict": true,
     "noUncheckedIndexedAccess": true,
     "skipLibCheck": true,
-    "resolveJsonModule": true,
-    "noEmit": true,
-    "lib": [
-      "ES2022"
-    ],
-    "types": [
-      "google-apps-script",
-      "node"
-    ]
+    "types": ["node"]
   },
-  "include": [
-    "src",
-    "tests"
-  ]
+  "include": ["src/core", "tests"]
 }

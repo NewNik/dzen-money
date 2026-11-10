@@ -1,16 +1,23 @@
-// Сборка в один файл для Apps Script: функции верхнего уровня объявляются в подвале.
+// Сборка для Apps Script: один файл build/Code.js + манифест.
+// Apps Script видит только функции верхнего уровня, поэтому к бандлу дописываются обёртки.
 import { build } from 'esbuild';
-import { copyFileSync, mkdirSync } from 'node:fs';
+import { copyFileSync, mkdirSync, writeFileSync } from 'node:fs';
 
-mkdirSync('dist', { recursive: true });
-await build({
+const ENTRY_POINTS = ['run', 'checkZen', 'tgSetup', 'dailySummary', 'install', 'uninstall', 'dumpSample'];
+
+const res = await build({
   entryPoints: ['src/gas/main.ts'],
   bundle: true,
   format: 'iife',
-  globalName: 'App',
+  globalName: 'ZenApp',
   target: 'es2020',
-  outfile: 'dist/Code.js',
-  footer: { js: 'function run() { App.run(); }\nfunction setup() { App.setup(); }\nfunction check() { App.check(); }' },
+  charset: 'utf8',
+  write: false,
 });
-copyFileSync('appsscript.json', 'dist/appsscript.json');
-console.log('dist/Code.js готов');
+const stubs = ENTRY_POINTS.map((f) => `function ${f}() { return ZenApp.${f}(); }`).join('\n');
+mkdirSync('build', { recursive: true });
+writeFileSync(
+  'build/Code.js',
+  `// СГЕНЕРИРОВАНО (npm run build) — не редактировать.\n${res.outputFiles[0].text}\n${stubs}\n`,
+);
+copyFileSync('appsscript.json', 'build/appsscript.json');

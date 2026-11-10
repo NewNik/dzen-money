@@ -25,15 +25,15 @@ export interface ParsedBankTxn {
   feeAmount: number;
   debitAccount: string;
   creditAccount?: string;
-  remitterName?: string;
-  beneficiaryName: string;
+  remitter?: string;
+  beneficiaryName?: string;
   beneficiaryBank?: string;
   billCode?: string;
   details?: string;
 }
 
 export interface ZenTransaction {
-  id: string;
+  id: string; // UUIDv5 от `vcb:<orderNumber>`
   changed: number;
   created: number;
   user: number;
@@ -52,10 +52,6 @@ export interface ZenTransaction {
   originalPayee: string | null;
   comment: string | null;
   date: string; // yyyy-MM-dd
-  qrCode: string | null;
-  source: string | null;
-  incomeBankID: string | null;
-  outcomeBankID: string | null;
   reminderMarker: string | null;
   opIncome: number | null;
   opIncomeInstrument: number | null;
@@ -63,6 +59,12 @@ export interface ZenTransaction {
   opOutcomeInstrument: number | null;
   latitude: number | null;
   longitude: number | null;
+  // поля из фактического ответа API (в wiki не описаны)
+  incomeBankID: string | null;
+  outcomeBankID: string | null;
+  qrCode: string | null;
+  source: string | null;
+  viewed: boolean;
 }
 
 export interface ZenTag {
