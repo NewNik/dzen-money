@@ -12,6 +12,8 @@ export type Decision =
   | { action: 'exists'; txn: ZenTransaction }
   /** Операцию с этим id удалили в приложении. Не воскрешаем. */
   | { action: 'deleted'; txn: ZenTransaction }
+  /** Удалённую операцию восстановить по явной просьбе (свойство REDO): отправить заново с deleted = false. */
+  | { action: 'restore'; txn: ZenTransaction }
   /** Похожая операция, внесённая вручную: тот же счёт и сумма, дата ±1 день, без маркера [vcb:…]. */
   | { action: 'manual-duplicate'; txn: ZenTransaction; match: ExistingTxn };
 
@@ -24,13 +26,22 @@ function sameSide(c: ZenTransaction, e: ExistingTxn): boolean {
   return false;
 }
 
-export function planWrites(candidates: ZenTransaction[], existing: readonly ExistingTxn[]): Decision[] {
+/**
+ * `redo` — id операций, которые человек явно попросил записать заново: удалённая восстанавливается,
+ * проверка на ручной дубль пропускается. Существующую (не удалённую) операцию redo не трогает.
+ */
+export function planWrites(
+  candidates: ZenTransaction[],
+  existing: readonly ExistingTxn[],
+  redo: ReadonlySet<string> = new Set(),
+): Decision[] {
   const byId = new Map(existing.map((e) => [e.id, e]));
   const manual = existing.filter((e) => !e.deleted && !(e.comment ?? '').includes('[vcb:'));
   const used = new Set<string>(); // одна ручная операция закрывает не больше одной из писем
   return candidates.map((txn): Decision => {
     const e = byId.get(txn.id);
-    if (e) return { action: e.deleted ? 'deleted' : 'exists', txn };
+    if (e) return { action: !e.deleted ? 'exists' : redo.has(txn.id) ? 'restore' : 'deleted', txn };
+    if (redo.has(txn.id)) return { action: 'create', txn };
     const match = manual.find((m) => !used.has(m.id) && dayDiff(m.date, txn.date) <= 1 && sameSide(txn, m));
     if (match) {
       used.add(match.id);

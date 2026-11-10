@@ -53,8 +53,8 @@ export function writeRequest(serverTimestamp: number, txns: ZenTransaction[], no
   return { currentClientTimestamp: now, serverTimestamp, transaction: txns };
 }
 
-/** id, которых нет среди операций в ответе на запись (сервер возвращает изменённые объекты). */
+/** id, которых нет среди операций в ответе на запись (сервер возвращает изменённые объекты) или которые там удалены. */
 export function missingAfterWrite(resp: unknown, ids: string[]): string[] {
-  const got = new Set(readTransactions(resp).map((t) => t.id));
+  const got = new Set(readTransactions(resp).filter((t) => !t.deleted).map((t) => t.id));
   return ids.filter((id) => !got.has(id));
 }

@@ -156,6 +156,12 @@ describe('проверка дублей', () => {
     const [second] = ok(parsed({ orderNumber: '00000000002' }));
     expect(planWrites([cand!, second!], [existing({})]).map((d) => d.action)).toEqual(['manual-duplicate', 'create']);
   });
+  it('REDO: удалённая восстанавливается, ручной дубль не мешает, существующая не трогается', () => {
+    const redo = new Set([cand!.id]);
+    expect(planWrites([cand!], [existing({ id: cand!.id, deleted: true })], redo)[0]!.action).toBe('restore');
+    expect(planWrites([cand!], [existing({})], redo)[0]!.action).toBe('create');
+    expect(planWrites([cand!], [existing({ id: cand!.id, comment: '[vcb:1]' })], redo)[0]!.action).toBe('exists');
+  });
   it('ручной перевод на наличные тоже ловится по стороне списания', () => {
     expect(planWrites([cand!], [existing({ incomeAccount: 'cash', income: 74000 })])[0]!.action).toBe('manual-duplicate');
   });
@@ -190,6 +196,13 @@ describe('план по письмам', () => {
     const [p] = planMessages([{ msgId: 'a', txn: parsed({ feeAmount: 3300 }) }], ctx, ids, [existing({})]);
     expect([p!.status, p!.creates]).toEqual(['duplicate', []]);
   });
+  it('REDO по Order Number: удалённая основная и комиссия восстанавливаются', () => {
+    const t = parsed({ feeAmount: 3300 });
+    const del = [existing({ id: vcbTxnId('00000000001'), deleted: true }), existing({ id: vcbTxnId('00000000001', true), deleted: true, outcome: 3300 })];
+    expect(planMessages([{ msgId: 'a', txn: t }], ctx, ids, del)[0]!.status).toBe('done');
+    const [p] = planMessages([{ msgId: 'a', txn: t }], ctx, ids, del, new Set(['00000000001']));
+    expect([p!.status, p!.decisions.map((d) => d.action), p!.creates.length]).toEqual(['create', ['restore', 'restore'], 2]);
+  });
   it('UUID из ACCOUNTS, которого нет в Дзен-мани, — unmapped', () => {
     const [p] = planMessages([{ msgId: 'a', txn: parsed() }], ctx, new Set([ACC_B]), []);
     expect(p!.status).toBe('unmapped');
@@ -221,6 +234,7 @@ describe('diff', () => {
   });
   it('проверка ответа на запись', () => {
     expect(missingAfterWrite({ transaction: [{ id: 'x' }] }, ['x', 'y'])).toEqual(['y']);
+    expect(missingAfterWrite({ transaction: [{ id: 'x', deleted: true }] }, ['x'])).toEqual(['x']);
   });
 });
 

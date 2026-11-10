@@ -343,7 +343,7 @@ var ZenApp = (() => {
     return { currentClientTimestamp: now, serverTimestamp, transaction: txns };
   }
   function missingAfterWrite(resp, ids) {
-    const got = new Set(readTransactions(resp).map((t) => t.id));
+    const got = new Set(readTransactions(resp).filter((t) => !t.deleted).map((t) => t.id));
     return ids.filter((id) => !got.has(id));
   }
 
@@ -355,13 +355,14 @@ var ZenApp = (() => {
     if (c.income > 0 && e.incomeAccount === c.incomeAccount && e.income === c.income) return true;
     return false;
   }
-  function planWrites(candidates, existing) {
+  function planWrites(candidates, existing, redo = /* @__PURE__ */ new Set()) {
     const byId = new Map(existing.map((e) => [e.id, e]));
     const manual = existing.filter((e) => !e.deleted && !(e.comment ?? "").includes("[vcb:"));
     const used = /* @__PURE__ */ new Set();
     return candidates.map((txn) => {
       const e = byId.get(txn.id);
-      if (e) return { action: e.deleted ? "deleted" : "exists", txn };
+      if (e) return { action: !e.deleted ? "exists" : redo.has(txn.id) ? "restore" : "deleted", txn };
+      if (redo.has(txn.id)) return { action: "create", txn };
       const match = manual.find((m) => !used.has(m.id) && dayDiff(m.date, txn.date) <= 1 && sameSide(txn, m));
       if (match) {
         used.add(match.id);
@@ -539,7 +540,7 @@ var ZenApp = (() => {
   }
 
   // src/core/zen/plan.ts
-  function planMessages(items, ctx, accountIds, existing) {
+  function planMessages(items, ctx, accountIds, existing, redoOrders = /* @__PURE__ */ new Set()) {
     const mapped = [];
     const plans = /* @__PURE__ */ new Map();
     for (const { msgId, txn } of items) {
@@ -561,7 +562,8 @@ var ZenApp = (() => {
       }
       mapped.push({ msgId, txns: r.txns });
     }
-    const decisions = planWrites(mapped.flatMap((m) => m.txns), existing);
+    const redo = new Set([...redoOrders].flatMap((o) => [vcbTxnId(o), vcbTxnId(o, true)]));
+    const decisions = planWrites(mapped.flatMap((m) => m.txns), existing, redo);
     let k = 0;
     for (const m of mapped) {
       const ds = decisions.slice(k, k += m.txns.length);
@@ -577,7 +579,7 @@ var ZenApp = (() => {
         });
         continue;
       }
-      const creates = ds.filter((d) => d.action === "create").map((d) => d.txn);
+      const creates = ds.filter((d) => d.action === "create" || d.action === "restore").map((d) => d.txn);
       plans.set(m.msgId, { msgId: m.msgId, status: creates.length ? "create" : "done", decisions: ds, creates });
     }
     return items.map((i) => plans.get(i.msgId));
@@ -655,7 +657,7 @@ var ZenApp = (() => {
     if (code !== 200) throw new Error(`Дзен-мани: HTTP ${code} ${r.getContentText().slice(0, 200)}`);
     return JSON.parse(r.getContentText());
   }
-  function syncToZen(pending, accounts, token, write, tag) {
+  function syncToZen(pending, accounts, token, write, tag, redo) {
     const now = Math.floor(Date.now() / 1e3);
     const full = zenDiff(token, fullFetchRequest(now));
     const meta = readMeta(full);
@@ -664,7 +666,8 @@ var ZenApp = (() => {
       pending.map((m) => ({ msgId: m.id, txn: m.txn })),
       { accounts, userId: meta.userId, instruments: meta.instruments, now, rules },
       meta.accountIds,
-      readTransactions(full)
+      readTransactions(full),
+      redo
     );
     const byId = new Map(pending.map((m) => [m.id, m]));
     for (const p of plans) {
@@ -700,17 +703,23 @@ var ZenApp = (() => {
       const seen = (props.getProperty("PROCESSED_IDS") ?? "").split(",").filter(Boolean);
       const seenSet = new Set(seen);
       const retries = JSON.parse(props.getProperty("RETRIES") ?? "{}");
+      const redo = new Set((props.getProperty("REDO") ?? "").split(/[\s,;]+/).filter(Boolean));
+      if (redo.size) console.log(`${tag} REDO: ${[...redo].join(", ")}`);
       const msgs = [];
       const broken = /* @__PURE__ */ new Set();
       threads.forEach((thread, i) => {
         try {
           for (const m of thread.getMessages()) {
             const id = m.getId();
-            if (seenSet.has(id)) {
+            if (seenSet.has(id) && !redo.size) {
               console.log(`${tag} skip msg=${id}: уже обработано`);
               continue;
             }
             const out = processEmail({ id, from: m.getFrom(), html: m.getBody(), raw: m.getRawContent() }, own);
+            if (seenSet.has(id) && !(out.status === "parsed" && redo.has(out.txn.orderNumber))) {
+              console.log(`${tag} skip msg=${id}: уже обработано`);
+              continue;
+            }
             console.log(`${tag} ${formatLog(id, out)}`);
             msgs.push(out.status === "parsed" ? { thread: i, id, result: null, txn: out.txn } : { thread: i, id, result: out.status });
           }
@@ -728,7 +737,7 @@ var ZenApp = (() => {
           pending.forEach((m) => m.result = "error");
         } else {
           try {
-            syncToZen(pending, accounts, token, write, tag);
+            syncToZen(pending, accounts, token, write, tag, redo);
             pending.forEach((m) => delete retries[m.id]);
           } catch (e) {
             console.error(`${tag} сбой Дзен-мани: ${e instanceof Error ? e.message : String(e)}`);
@@ -762,6 +771,13 @@ var ZenApp = (() => {
       }
       props.setProperty("PROCESSED_IDS", seen.slice(-KEEP_IDS).join(","));
       props.setProperty("RETRIES", JSON.stringify(retries));
+      const doneRedo = msgs.filter((m) => m.result === "done" && m.txn && redo.has(m.txn.orderNumber)).map((m) => m.txn.orderNumber);
+      if (write && doneRedo.length) {
+        const left = [...redo].filter((o) => !doneRedo.includes(o));
+        if (left.length) props.setProperty("REDO", left.join(","));
+        else props.deleteProperty("REDO");
+        console.log(`${tag} REDO выполнено: ${doneRedo.join(", ")}`);
+      }
     } finally {
       lock.releaseLock();
     }

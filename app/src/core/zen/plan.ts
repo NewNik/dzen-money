@@ -2,6 +2,7 @@
 import type { ParsedBankTxn, ZenTransaction } from '../types';
 import { planWrites, type Decision, type ExistingTxn } from './dedup';
 import { toZenTransactions, type ZenContext } from './mapper';
+import { vcbTxnId } from '../uuid';
 
 export type MsgStatus =
   /** есть операции к созданию */
@@ -27,6 +28,8 @@ export function planMessages(
   ctx: ZenContext,
   accountIds: ReadonlySet<string>,
   existing: readonly ExistingTxn[],
+  /** Order Number, которые человек попросил записать заново (свойство REDO). */
+  redoOrders: ReadonlySet<string> = new Set(),
 ): MsgPlan[] {
   const mapped: { msgId: string; txns: ZenTransaction[] }[] = [];
   const plans = new Map<string, MsgPlan>();
@@ -51,7 +54,8 @@ export function planMessages(
   }
 
   // Дубли проверяем по всей пачке сразу: одна ручная операция не закроет два письма.
-  const decisions = planWrites(mapped.flatMap((m) => m.txns), existing);
+  const redo = new Set([...redoOrders].flatMap((o) => [vcbTxnId(o), vcbTxnId(o, true)]));
+  const decisions = planWrites(mapped.flatMap((m) => m.txns), existing, redo);
   let k = 0;
   for (const m of mapped) {
     const ds = decisions.slice(k, (k += m.txns.length));
@@ -67,7 +71,7 @@ export function planMessages(
       });
       continue;
     }
-    const creates = ds.filter((d) => d.action === 'create').map((d) => d.txn);
+    const creates = ds.filter((d) => d.action === 'create' || d.action === 'restore').map((d) => d.txn);
     plans.set(m.msgId, { msgId: m.msgId, status: creates.length ? 'create' : 'done', decisions: ds, creates });
   }
   return items.map((i) => plans.get(i.msgId)!);

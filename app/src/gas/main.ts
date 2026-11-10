@@ -89,7 +89,14 @@ interface Msg {
 }
 
 /** Проверка дублей и (в режиме write) запись. Заполняет result у писем. Сбой Дзен-мани — исключение. */
-function syncToZen(pending: Msg[], accounts: Record<string, string>, token: string, write: boolean, tag: string): void {
+function syncToZen(
+  pending: Msg[],
+  accounts: Record<string, string>,
+  token: string,
+  write: boolean,
+  tag: string,
+  redo: ReadonlySet<string>,
+): void {
   const now = Math.floor(Date.now() / 1000);
   // Полная выгрузка (~2,5 МБ) только когда есть что записать: нужна для проверки дублей по всем операциям.
   const full = zenDiff(token, fullFetchRequest(now));
@@ -100,6 +107,7 @@ function syncToZen(pending: Msg[], accounts: Record<string, string>, token: stri
     { accounts, userId: meta.userId, instruments: meta.instruments, now, rules },
     meta.accountIds,
     readTransactions(full),
+    redo,
   );
 
   const byId = new Map(pending.map((m) => [m.id, m]));
@@ -147,6 +155,9 @@ export function run(): void {
     const seen = (props.getProperty('PROCESSED_IDS') ?? '').split(',').filter(Boolean);
     const seenSet = new Set(seen);
     const retries = JSON.parse(props.getProperty('RETRIES') ?? '{}') as Record<string, number>;
+    // REDO: Order Number через запятую — записать заново, даже если письмо уже обработано, а операция удалена.
+    const redo = new Set((props.getProperty('REDO') ?? '').split(/[\s,;]+/).filter(Boolean));
+    if (redo.size) console.log(`${tag} REDO: ${[...redo].join(', ')}`);
 
     const msgs: Msg[] = [];
     const broken = new Set<number>(); // треды с исключением при разборе
@@ -154,11 +165,16 @@ export function run(): void {
       try {
         for (const m of thread.getMessages()) {
           const id = m.getId();
-          if (seenSet.has(id)) {
+          if (seenSet.has(id) && !redo.size) {
             console.log(`${tag} skip msg=${id}: уже обработано`);
             continue;
           }
           const out = processEmail({ id, from: m.getFrom(), html: m.getBody(), raw: m.getRawContent() }, own);
+          // При непустом REDO обработанные письма разбираются, но идут дальше только номера из REDO.
+          if (seenSet.has(id) && !(out.status === 'parsed' && redo.has(out.txn.orderNumber))) {
+            console.log(`${tag} skip msg=${id}: уже обработано`);
+            continue;
+          }
           console.log(`${tag} ${formatLog(id, out)}`);
           msgs.push(out.status === 'parsed' ? { thread: i, id, result: null, txn: out.txn } : { thread: i, id, result: out.status });
         }
@@ -177,7 +193,7 @@ export function run(): void {
         pending.forEach((m) => (m.result = 'error'));
       } else {
         try {
-          syncToZen(pending, accounts, token, write, tag);
+          syncToZen(pending, accounts, token, write, tag, redo);
           pending.forEach((m) => delete retries[m.id]);
         } catch (e) {
           console.error(`${tag} сбой Дзен-мани: ${e instanceof Error ? e.message : String(e)}`);
@@ -213,6 +229,14 @@ export function run(): void {
     }
     props.setProperty('PROCESSED_IDS', seen.slice(-KEEP_IDS).join(','));
     props.setProperty('RETRIES', JSON.stringify(retries));
+    // Выполненные REDO убираем, чтобы при следующих запусках не разбирать память заново.
+    const doneRedo = msgs.filter((m) => m.result === 'done' && m.txn && redo.has(m.txn.orderNumber)).map((m) => m.txn!.orderNumber);
+    if (write && doneRedo.length) {
+      const left = [...redo].filter((o) => !doneRedo.includes(o));
+      if (left.length) props.setProperty('REDO', left.join(','));
+      else props.deleteProperty('REDO');
+      console.log(`${tag} REDO выполнено: ${doneRedo.join(', ')}`);
+    }
   } finally {
     lock.releaseLock();
   }
