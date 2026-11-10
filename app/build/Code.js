@@ -414,6 +414,12 @@ var ZenApp = (() => {
     };
   }
   var withMarker = (text, m) => text ? `${text} ${m}` : m;
+  var norm = (s) => s.normalize("NFC").replace(/\s+/g, " ").trim().toLowerCase();
+  function cleanDetails(details, remitter) {
+    if (!details) return void 0;
+    if (remitter && norm(details) === `${norm(remitter)} transfer`) return void 0;
+    return details;
+  }
   function toZenTransactions(t, ctx) {
     const instrument = ctx.instruments[t.currency];
     if (instrument === void 0) return { ok: false, reason: `нет валюты ${t.currency} в Дзен-мани` };
@@ -457,7 +463,7 @@ var ZenApp = (() => {
       outcome,
       payee,
       originalPayee: payee,
-      comment: withMarker(t.details, marker(t.orderNumber)),
+      comment: withMarker(cleanDetails(t.details, t.remitter), marker(t.orderNumber)),
       date: t.dateLocal
     };
     const txns = [main];

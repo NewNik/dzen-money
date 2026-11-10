@@ -47,6 +47,18 @@ function blank(ctx: ZenContext): Omit<ZenTransaction, 'id' | 'incomeInstrument' 
 
 const withMarker = (text: string | undefined, m: string): string => (text ? `${text} ${m}` : m);
 
+const norm = (s: string): string => s.normalize('NFC').replace(/\s+/g, ' ').trim().toLowerCase();
+
+/**
+ * Назначение платежа для комментария. Если назначение не ввели, VCB подставляет «<имя отправителя> transfer» —
+ * такой автотекст не несёт смысла и содержит имя, его отбрасываем.
+ */
+export function cleanDetails(details: string | undefined, remitter: string | undefined): string | undefined {
+  if (!details) return undefined;
+  if (remitter && norm(details) === `${norm(remitter)} transfer`) return undefined;
+  return details;
+}
+
 export function toZenTransactions(t: ParsedBankTxn, ctx: ZenContext): MapResult {
   const instrument = ctx.instruments[t.currency];
   if (instrument === undefined) return { ok: false, reason: `нет валюты ${t.currency} в Дзен-мани` };
@@ -92,7 +104,7 @@ export function toZenTransactions(t: ParsedBankTxn, ctx: ZenContext): MapResult 
     outcome,
     payee,
     originalPayee: payee,
-    comment: withMarker(t.details, marker(t.orderNumber)),
+    comment: withMarker(cleanDetails(t.details, t.remitter), marker(t.orderNumber)),
     date: t.dateLocal,
   };
   const txns = [main];

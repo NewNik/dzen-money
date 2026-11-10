@@ -75,7 +75,7 @@ describe('маппер', () => {
       merchant: null,
       payee: 'TEST SHOP',
       originalPayee: 'TEST SHOP',
-      comment: 'TEST USER transfer [vcb:00000000001]',
+      comment: '[vcb:00000000001]',
       date: '2026-11-08',
       reminderMarker: null,
       opIncome: null,
@@ -111,6 +111,12 @@ describe('маппер', () => {
   });
   it('без назначения платежа — только маркер', () => {
     expect(ok(parsed({ details: undefined }))[0]!.comment).toBe('[vcb:00000000001]');
+  });
+  it('автотекст VCB «<отправитель> transfer» отбрасывается, своё назначение остаётся', () => {
+    expect(ok(parsed({ details: '  test  user TRANSFER ' }))[0]!.comment).toBe('[vcb:00000000001]');
+    expect(ok(parsed({ details: 'TEST USER transfer rent' }))[0]!.comment).toBe('TEST USER transfer rent [vcb:00000000001]');
+    expect(ok(parsed({ details: 'Tien nha thang 11' }))[0]!.comment).toBe('Tien nha thang 11 [vcb:00000000001]');
+    expect(ok(parsed({ remitter: undefined }))[0]!.comment).toBe('TEST USER transfer [vcb:00000000001]');
   });
   it('unknown и неизвестная валюта — ошибка, а не операция', () => {
     expect(toZenTransactions(parsed({ kind: 'unknown' }), ctx).ok).toBe(false);
