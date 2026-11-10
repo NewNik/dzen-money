@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import type { ParsedBankTxn, ZenTransaction } from '../src/core/types';
-import { vcbTxnId } from '../src/core/uuid';
+import { uuidv5, vcbTxnId } from '../src/core/uuid';
 import { planWrites, type ExistingTxn } from '../src/core/zen/dedup';
 import { missingAfterWrite, readMeta, writeRequest } from '../src/core/zen/diff';
 import { toZenTransactions, type ZenContext } from '../src/core/zen/mapper';
@@ -134,6 +134,14 @@ describe('проверка дублей', () => {
   it('тот же id уже есть — не отправлять', () => {
     expect(planWrites([cand!], [existing({ id: cand!.id, comment: '[vcb:00000000001]' })])[0]!.action).toBe('exists');
   });
+  it('записанная заново (другой id, та же метка) считается уже записанной', () => {
+    const e = existing({ id: uuidv5('vcb:00000000001:r1'), comment: '[vcb:00000000001]' });
+    expect(planWrites([cand!], [existing({ id: cand!.id, deleted: true }), e])[0]!.action).toBe('exists');
+    expect(planWrites([cand!], [existing({ id: cand!.id, deleted: true }), e], new Set([cand!.id]))[0]!.action).toBe('exists');
+  });
+  it('метка комиссии не путается с меткой основной операции', () => {
+    expect(planWrites([cand!], [existing({ id: 'x', comment: '[vcb:00000000001:fee]', outcome: 1 })])[0]!.action).toBe('create');
+  });
   it('тот же id удалён в приложении — не воскрешать', () => {
     expect(planWrites([cand!], [existing({ id: cand!.id, deleted: true })])[0]!.action).toBe('deleted');
   });
@@ -158,7 +166,15 @@ describe('проверка дублей', () => {
   });
   it('REDO: удалённая восстанавливается, ручной дубль не мешает, существующая не трогается', () => {
     const redo = new Set([cand!.id]);
-    expect(planWrites([cand!], [existing({ id: cand!.id, deleted: true })], redo)[0]!.action).toBe('restore');
+    const r = planWrites([cand!], [existing({ id: cand!.id, deleted: true })], redo)[0]!;
+    expect([r.action, r.txn.id]).toEqual(['restore', uuidv5('vcb:00000000001:r1')]);
+    // вторая попытка после ещё одного удаления — следующий id
+    const r2 = planWrites(
+      [cand!],
+      [existing({ id: cand!.id, deleted: true }), existing({ id: uuidv5('vcb:00000000001:r1'), deleted: true, comment: '[vcb:00000000001]' })],
+      redo,
+    )[0]!;
+    expect(r2.txn.id).toBe(uuidv5('vcb:00000000001:r2'));
     expect(planWrites([cand!], [existing({})], redo)[0]!.action).toBe('create');
     expect(planWrites([cand!], [existing({ id: cand!.id, comment: '[vcb:1]' })], redo)[0]!.action).toBe('exists');
   });

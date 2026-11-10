@@ -347,31 +347,6 @@ var ZenApp = (() => {
     return ids.filter((id) => !got.has(id));
   }
 
-  // src/core/zen/dedup.ts
-  var DAY = 864e5;
-  var dayDiff = (a, b) => Math.abs(Date.parse(a) - Date.parse(b)) / DAY;
-  function sameSide(c, e) {
-    if (c.outcome > 0 && e.outcomeAccount === c.outcomeAccount && e.outcome === c.outcome) return true;
-    if (c.income > 0 && e.incomeAccount === c.incomeAccount && e.income === c.income) return true;
-    return false;
-  }
-  function planWrites(candidates, existing, redo = /* @__PURE__ */ new Set()) {
-    const byId = new Map(existing.map((e) => [e.id, e]));
-    const manual = existing.filter((e) => !e.deleted && !(e.comment ?? "").includes("[vcb:"));
-    const used = /* @__PURE__ */ new Set();
-    return candidates.map((txn) => {
-      const e = byId.get(txn.id);
-      if (e) return { action: !e.deleted ? "exists" : redo.has(txn.id) ? "restore" : "deleted", txn };
-      if (redo.has(txn.id)) return { action: "create", txn };
-      const match = manual.find((m) => !used.has(m.id) && dayDiff(m.date, txn.date) <= 1 && sameSide(txn, m));
-      if (match) {
-        used.add(match.id);
-        return { action: "manual-duplicate", txn, match };
-      }
-      return { action: "create", txn };
-    });
-  }
-
   // src/core/uuid.ts
   function sha1(bytes) {
     const len = bytes.length;
@@ -433,6 +408,40 @@ var ZenApp = (() => {
     return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20)}`;
   }
   var vcbTxnId = (orderNumber, fee = false) => uuidv5(`vcb:${orderNumber}${fee ? ":fee" : ""}`);
+
+  // src/core/zen/dedup.ts
+  var markerName = (comment) => /\[(vcb:[^\]]+)\]/.exec(comment ?? "")?.[1];
+  var DAY = 864e5;
+  var dayDiff = (a, b) => Math.abs(Date.parse(a) - Date.parse(b)) / DAY;
+  function sameSide(c, e) {
+    if (c.outcome > 0 && e.outcomeAccount === c.outcomeAccount && e.outcome === c.outcome) return true;
+    if (c.income > 0 && e.incomeAccount === c.incomeAccount && e.income === c.income) return true;
+    return false;
+  }
+  function planWrites(candidates, existing, redo = /* @__PURE__ */ new Set()) {
+    const byId = new Map(existing.map((e) => [e.id, e]));
+    const aliveMarkers = new Set(existing.filter((e) => !e.deleted).map((e) => markerName(e.comment)).filter(Boolean));
+    const manual = existing.filter((e) => !e.deleted && !(e.comment ?? "").includes("[vcb:"));
+    const used = /* @__PURE__ */ new Set();
+    return candidates.map((txn) => {
+      const e = byId.get(txn.id);
+      const name = markerName(txn.comment);
+      if (e && !e.deleted || name && aliveMarkers.has(name)) return { action: "exists", txn };
+      if (e) {
+        if (!redo.has(txn.id) || !name) return { action: "deleted", txn };
+        let n = 1;
+        while (byId.has(uuidv5(`${name}:r${n}`))) n++;
+        return { action: "restore", txn: { ...txn, id: uuidv5(`${name}:r${n}`) } };
+      }
+      if (redo.has(txn.id)) return { action: "create", txn };
+      const match = manual.find((m) => !used.has(m.id) && dayDiff(m.date, txn.date) <= 1 && sameSide(txn, m));
+      if (match) {
+        used.add(match.id);
+        return { action: "manual-duplicate", txn, match };
+      }
+      return { action: "create", txn };
+    });
+  }
 
   // src/core/zen/mapper.ts
   var marker = (orderNumber, fee = false) => `[vcb:${orderNumber}${fee ? ":fee" : ""}]`;
