@@ -61,31 +61,52 @@ export function splitLabel(cell: string): { head: string; inline: string } | nul
   return { head: colon >= 0 ? cell.slice(0, colon) : cell, inline: lab.inline };
 }
 
-/** Значение — хвост той же ячейки либо первая следующая ячейка, не являющаяся подписью. */
-export function extractFields(cells: string[]): Partial<Record<Field, string>> {
-  const out: Partial<Record<Field, string>> = {};
+/**
+ * Для каждого поля — все ячейки-значения от подписи до подписи другого поля.
+ * Значение может быть хвостом той же ячейки (`Подпись: значение`) или следующими ячейками;
+ * вторая половина двуязычной подписи того же поля пропускается.
+ */
+export function extractFieldRuns(cells: string[]): Partial<Record<Field, string[]>> {
+  const out: Partial<Record<Field, string[]>> = {};
   for (let i = 0; i < cells.length; i++) {
     const lab = asLabel(cells[i]!);
     if (!lab || out[lab.field] !== undefined) continue;
-    if (lab.inline) {
-      out[lab.field] = lab.inline;
-      continue;
-    }
+    const run = lab.inline ? [lab.inline] : [];
     for (let j = i + 1; j < cells.length; j++) {
       const next = asLabel(cells[j]!);
       if (!next) {
-        out[lab.field] = cells[j]!;
-        break;
+        run.push(cells[j]!);
+        continue;
       }
-      // вторая половина двуязычной подписи того же поля — пропускаем; другое поле — значения нет
       if (next.field !== lab.field) break;
-      if (next.inline) {
-        out[lab.field] = next.inline;
-        break;
-      }
+      if (next.inline) run.push(next.inline);
     }
+    out[lab.field] = run;
   }
   return out;
+}
+
+/** Значение поля — первая ячейка его серии; поле без значений считается отсутствующим. */
+export function extractFields(cells: string[]): Partial<Record<Field, string>> {
+  const out: Partial<Record<Field, string>> = {};
+  const runs = extractFieldRuns(cells);
+  for (const f of Object.keys(runs) as Field[]) if (runs[f]!.length) out[f] = runs[f]![0];
+  return out;
+}
+
+/**
+ * Комиссия. Простой вид — одна ячейка `0 VND`. В настоящих письмах ячейка многострочная:
+ * подписи «Số tiền phí / Charge Amount / <ещё подпись> / VAT», значения `0 VND / пусто / 0 VND / 0 VND`.
+ * Берём первую сумму. Если сумм несколько и хоть одна ненулевая — смысл строк (с VAT или без)
+ * образцом не подтверждён, поэтому ошибка, а не догадка.
+ */
+export function parseVcbFee(run: string[]): { amount: number; currency: string } | { error: string } {
+  const amounts = run.map(parseVcbAmount).filter((a): a is { amount: number; currency: string } => a !== null);
+  if (!amounts.length) return { error: 'не разобрана комиссия' };
+  if (amounts.length > 1 && amounts.some((a) => a.amount > 0)) {
+    return { error: 'ненулевая комиссия с разбивкой (VAT): нужен образец письма' };
+  }
+  return amounts[0]!;
 }
 
 /** `10:57 Sunday 08/11/2026` → локальное вьетнамское время (UTC+7). */
@@ -131,6 +152,7 @@ export interface ParseContext {
 export type ParseResult = { ok: true; txn: ParsedBankTxn } | { ok: false; error: string };
 
 export function parseTransferReceiptCells(cells: string[], ctx: ParseContext): ParseResult {
+  const runs = extractFieldRuns(cells);
   const f = extractFields(cells);
   const missing = REQUIRED.filter((k) => !f[k]);
   if (missing.length) return { ok: false, error: `нет полей: ${missing.join(', ')}` };
@@ -139,8 +161,8 @@ export function parseTransferReceiptCells(cells: string[], ctx: ParseContext): P
   if (!dt) return { ok: false, error: 'не разобрана дата' };
   const amount = parseVcbAmount(f.amount!);
   if (!amount || amount.amount <= 0) return { ok: false, error: 'не разобрана сумма' };
-  const fee = parseVcbAmount(f.chargeAmount!);
-  if (!fee) return { ok: false, error: 'не разобрана комиссия' };
+  const fee = parseVcbFee(runs.chargeAmount ?? []);
+  if ('error' in fee) return { ok: false, error: fee.error };
   if (fee.amount > 0 && fee.currency !== amount.currency) return { ok: false, error: 'валюта комиссии отличается' };
   const orderNumber = f.orderNumber!.replace(/\s/g, '');
   if (!/^[A-Za-z0-9-]+$/.test(orderNumber)) return { ok: false, error: 'не разобран Order Number' };

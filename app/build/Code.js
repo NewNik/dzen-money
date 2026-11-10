@@ -93,29 +93,38 @@ var ZenApp = (() => {
     const colon = cell.indexOf(":");
     return { head: colon >= 0 ? cell.slice(0, colon) : cell, inline: lab.inline };
   }
-  function extractFields(cells) {
+  function extractFieldRuns(cells) {
     const out = {};
     for (let i = 0; i < cells.length; i++) {
       const lab = asLabel(cells[i]);
       if (!lab || out[lab.field] !== void 0) continue;
-      if (lab.inline) {
-        out[lab.field] = lab.inline;
-        continue;
-      }
+      const run2 = lab.inline ? [lab.inline] : [];
       for (let j = i + 1; j < cells.length; j++) {
         const next = asLabel(cells[j]);
         if (!next) {
-          out[lab.field] = cells[j];
-          break;
+          run2.push(cells[j]);
+          continue;
         }
         if (next.field !== lab.field) break;
-        if (next.inline) {
-          out[lab.field] = next.inline;
-          break;
-        }
+        if (next.inline) run2.push(next.inline);
       }
+      out[lab.field] = run2;
     }
     return out;
+  }
+  function extractFields(cells) {
+    const out = {};
+    const runs = extractFieldRuns(cells);
+    for (const f of Object.keys(runs)) if (runs[f].length) out[f] = runs[f][0];
+    return out;
+  }
+  function parseVcbFee(run2) {
+    const amounts = run2.map(parseVcbAmount).filter((a) => a !== null);
+    if (!amounts.length) return { error: "не разобрана комиссия" };
+    if (amounts.length > 1 && amounts.some((a) => a.amount > 0)) {
+      return { error: "ненулевая комиссия с разбивкой (VAT): нужен образец письма" };
+    }
+    return amounts[0];
   }
   function parseVcbDateTime(s) {
     const m = /(\d{1,2}):(\d{2})(?::(\d{2}))?\D+?(\d{1,2})\/(\d{1,2})\/(\d{4})/.exec(s);
@@ -143,6 +152,7 @@ var ZenApp = (() => {
     return d && c ? "transfer" : d ? "expense" : c ? "income" : "unknown";
   }
   function parseTransferReceiptCells(cells, ctx) {
+    const runs = extractFieldRuns(cells);
     const f = extractFields(cells);
     const missing = REQUIRED.filter((k) => !f[k]);
     if (missing.length) return { ok: false, error: `нет полей: ${missing.join(", ")}` };
@@ -150,8 +160,8 @@ var ZenApp = (() => {
     if (!dt) return { ok: false, error: "не разобрана дата" };
     const amount = parseVcbAmount(f.amount);
     if (!amount || amount.amount <= 0) return { ok: false, error: "не разобрана сумма" };
-    const fee = parseVcbAmount(f.chargeAmount);
-    if (!fee) return { ok: false, error: "не разобрана комиссия" };
+    const fee = parseVcbFee(runs.chargeAmount ?? []);
+    if ("error" in fee) return { ok: false, error: fee.error };
     if (fee.amount > 0 && fee.currency !== amount.currency) return { ok: false, error: "валюта комиссии отличается" };
     const orderNumber = f.orderNumber.replace(/\s/g, "");
     if (!/^[A-Za-z0-9-]+$/.test(orderNumber)) return { ok: false, error: "не разобран Order Number" };

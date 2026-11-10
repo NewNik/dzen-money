@@ -52,6 +52,19 @@ describe('граничные случаи', () => {
     const r = parseTransferReceipt(html.replace('<td>74,000 VND</td>', '<td></td>'), ctx);
     expect(r.ok).toBe(false);
   });
+  it('настоящая вёрстка: ненулевая комиссия с разбивкой по VAT → ошибка, а не догадка', () => {
+    const real = readFileSync(join(dir, '03-real-layout-vat.html'), 'utf8');
+    const r = parseTransferReceipt(
+      real.replace('<td>0 VND<br>&nbsp;<br>0 VND<br>0 VND</td>', '<td>3,300 VND<br>&nbsp;<br>3,000 VND<br>300 VND</td>'),
+      ctx,
+    );
+    expect(r).toEqual({ ok: false, error: 'ненулевая комиссия с разбивкой (VAT): нужен образец письма' });
+  });
+  it('настоящая вёрстка: подписи «Fee amount»/«VAT» не принимаются за значение комиссии', () => {
+    const real = readFileSync(join(dir, '03-real-layout-vat.html'), 'utf8');
+    const r = parseTransferReceipt(real.replace('<td>0 VND<br>&nbsp;<br>0 VND<br>0 VND</td>', '<td>&nbsp;</td>'), ctx);
+    expect(r).toEqual({ ok: false, error: 'не разобрана комиссия' });
+  });
   it('«Số tiền» не путается с «Số tiền phí»', () => {
     const cells = htmlToCells(html.replace('<td>0 VND</td>', '<td>3,300 VND</td>'));
     const r = parseTransferReceiptCells(cells, ctx);
