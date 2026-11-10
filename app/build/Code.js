@@ -286,7 +286,7 @@ var ZenApp = (() => {
   var label = (name) => GmailApp.getUserLabelByName(name) ?? GmailApp.createLabel(name);
   function ownAccounts(props) {
     const raw = props.getProperty("ACCOUNTS");
-    return raw ? Object.keys(JSON.parse(raw)) : [];
+    return raw ? Object.keys(JSON.parse(raw)).map((k) => k.replace(/\D/g, "")) : [];
   }
   function run() {
     const lock = LockService.getScriptLock();
@@ -297,7 +297,9 @@ var ZenApp = (() => {
       const seen = (props.getProperty("PROCESSED_IDS") ?? "").split(",").filter(Boolean);
       const seenSet = new Set(seen);
       const inbox = label(L.inbox);
-      for (const thread of inbox.getThreads(0, BATCH)) {
+      const threads = inbox.getThreads(0, BATCH);
+      if (threads.length) console.log(`[dry-run] свои счета (ACCOUNTS): ${own.map(maskAccount).join(", ") || "не заданы"}`);
+      for (const thread of threads) {
         let worst = -1;
         try {
           for (const m of thread.getMessages()) {

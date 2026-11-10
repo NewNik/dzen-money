@@ -1,7 +1,7 @@
 // Тонкий слой Apps Script: Gmail, метки, таймер. Вся логика — в core.
 // Этап 2: только чтение и лог (dry-run). Запись в Дзен-мани появится на этапе 3.
 import { anonymizeHtml } from '../core/banks/vcb/anonymize';
-import { formatLog, processEmail, VCB_SENDER } from '../core/pipeline';
+import { formatLog, maskAccount, processEmail, VCB_SENDER } from '../core/pipeline';
 
 const L = {
   inbox: 'zen/inbox',
@@ -22,7 +22,8 @@ const label = (name: string): GoogleAppsScript.Gmail.GmailLabel =>
 /** Номера своих счётов из свойства ACCOUNTS: {"<номер счёта>": "<UUID счёта в Дзен-мани>"}. */
 function ownAccounts(props: GoogleAppsScript.Properties.Properties): string[] {
   const raw = props.getProperty('ACCOUNTS');
-  return raw ? Object.keys(JSON.parse(raw) as Record<string, string>) : [];
+  // Пробелы, точки и дефисы в номере не важны: сравниваем только цифры, как и номера из письма.
+  return raw ? Object.keys(JSON.parse(raw) as Record<string, string>).map((k) => k.replace(/\D/g, '')) : [];
 }
 
 /** Запускается по таймеру. */
@@ -37,7 +38,9 @@ export function run(): void {
     const seenSet = new Set(seen);
     const inbox = label(L.inbox);
 
-    for (const thread of inbox.getThreads(0, BATCH)) {
+    const threads = inbox.getThreads(0, BATCH);
+    if (threads.length) console.log(`[dry-run] свои счета (ACCOUNTS): ${own.map(maskAccount).join(', ') || 'не заданы'}`);
+    for (const thread of threads) {
       let worst = -1;
       try {
         for (const m of thread.getMessages()) {
