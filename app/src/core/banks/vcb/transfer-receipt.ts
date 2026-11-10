@@ -53,6 +53,14 @@ function asLabel(cell: string): { field: Field; inline: string } | null {
   return field === undefined ? null : { field, inline };
 }
 
+/** Для обезличивания: подпись ли это, и если да — её текст и значение после двоеточия. */
+export function splitLabel(cell: string): { head: string; inline: string } | null {
+  const lab = asLabel(cell);
+  if (!lab) return null;
+  const colon = cell.indexOf(':');
+  return { head: colon >= 0 ? cell.slice(0, colon) : cell, inline: lab.inline };
+}
+
 /** Значение — хвост той же ячейки либо первая следующая ячейка, не являющаяся подписью. */
 export function extractFields(cells: string[]): Partial<Record<Field, string>> {
   const out: Partial<Record<Field, string>> = {};
