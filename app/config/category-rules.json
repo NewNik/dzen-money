@@ -1,16 +1,14 @@
 {
   "_comment": "Правила категорий расходов. Описание и обоснование — kb/category-rules.md. Порядок правил = приоритет, срабатывает первое.",
-  "version": 1,
+  "version": 2,
   "matching": {
     "fields": [
-      "beneficiaryName",
-      "details",
-      "payee",
-      "comment"
+      "beneficiaryName"
     ],
     "normalize": "lowercase, NFD без диакритики, đ→d, ё→е, схлопнуть пробелы",
     "wrap": "(?<![\\p{L}\\p{N}])(?:PATTERN)",
-    "flags": "iu"
+    "flags": "iu",
+    "note": "По письмам VCB искать только в имени получателя: назначение платежа не несёт смысла. payee и comment — только для операций, внесённых вручную."
   },
   "neverAssign": [
     "Питание / Еда на работе",
@@ -26,6 +24,54 @@
   ],
   "feeTag": "Подписки",
   "rules": [
+    {
+      "id": "ben-wincommerce",
+      "tag": "Питание / Хотелки",
+      "match": [
+        "wincommerce",
+        "winmart",
+        "vinmart",
+        "win ?mart"
+      ],
+      "confidence": "medium",
+      "source": "emails",
+      "merchant": "WinMart",
+      "note": "9 из 10 сопоставленных писем"
+    },
+    {
+      "id": "ben-minimart",
+      "tag": "Питание / Хотелки",
+      "match": [
+        "mini ?mart"
+      ],
+      "confidence": "medium",
+      "source": "emails",
+      "note": "6 из 6"
+    },
+    {
+      "id": "ben-bakery",
+      "tag": "Питание / Продукты",
+      "match": [
+        "tiem banh"
+      ],
+      "confidence": "low",
+      "source": "emails",
+      "needsReview": true,
+      "note": "3 из 5, остальное — Хотелки"
+    },
+    {
+      "id": "ben-bhx",
+      "tag": null,
+      "match": [
+        "bach hoa xanh",
+        "bhx"
+      ],
+      "confidence": "low",
+      "source": "emails",
+      "needsReview": true,
+      "merchant": "Bach Hoa Xanh",
+      "note": "Продукты 6, Хотелки 6 — по имени не различить"
+    },
     {
       "id": "rent",
       "tag": "Жильё / Аренда",
@@ -90,6 +136,7 @@
       "id": "telecom",
       "tag": "Связь",
       "match": [
+        "vms(?![a-z])",
         "viettel",
         "vinaphone",
         "mobifone",
@@ -672,7 +719,6 @@
         "starbucks",
         "the coffee house",
         "cong ca ?phe",
-        "circle ?k",
         "gs25",
         "7-?eleven",
         "ministop",
@@ -685,16 +731,11 @@
       "id": "groceries",
       "tag": "Питание / Продукты",
       "match": [
-        "winmart",
-        "vinmart",
-        "win ?mart",
         "co\\.?op ?mart",
         "co\\.?op ?food",
         "lotte ?mart",
         "go!",
         "big ?c",
-        "bach hoa xanh",
-        "bhx",
         "mega market",
         "aeon",
         "annam gourmet",
@@ -972,7 +1013,14 @@
         "tiktok ?shop",
         "tiki(?![a-z])",
         "ozon",
-        "wildberries"
+        "wildberries",
+        "shopeepay",
+        "baokim",
+        "payoo",
+        "momo",
+        "vnpay",
+        "zalopay",
+        "onepay"
       ],
       "confidence": "low",
       "source": "history",
@@ -1028,6 +1076,18 @@
       "exact": 27000,
       "tag": "Питание / Продукты",
       "precision": "8/8",
+      "needsReview": true
+    }
+  ],
+  "personHeuristics": [
+    {
+      "id": "person-delivery",
+      "when": "получатель — физлицо (нет слов HO KINH DOANH, CONG TY, CTY, CTCP, JSC, SHOP, MART и т. п.), личного правила нет",
+      "amountMin": 140000,
+      "amountMax": 450000,
+      "multipleOf": 1000,
+      "tag": "Питание / Доставка еды",
+      "precision": "17/20",
       "needsReview": true
     }
   ]
