@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import type { ParsedBankTxn, ZenTransaction } from '../src/core/types';
 import { uuidv5, vcbTxnId } from '../src/core/uuid';
-import { planWrites, type ExistingTxn } from '../src/core/zen/dedup';
+import { inexactMatch, planWrites, type ExistingTxn } from '../src/core/zen/dedup';
 import { missingAfterWrite, readMeta, writeRequest } from '../src/core/zen/diff';
 import { toZenTransactions, type ZenContext } from '../src/core/zen/mapper';
 import { formatDecision, planMessages } from '../src/core/zen/plan';
@@ -160,17 +160,57 @@ describe('проверка дублей', () => {
       expect(planWrites([cand!], [e])[0]!.action).toBe('create');
     }
   });
-  it('сумма округлена или с опечаткой (до 3 %, минимум 1000) — неточный дубль', () => {
-    const d = planWrites([cand!], [existing({ outcome: 74500 })])[0]!;
-    expect(d).toMatchObject({ action: 'manual-duplicate', fuzzy: true });
-    expect(planWrites([cand!], [existing({ outcome: 76500 })])[0]!.action).toBe('create');
-    expect(planWrites([cand!], [existing({})])[0]).toMatchObject({ action: 'manual-duplicate', fuzzy: false });
-    const [big] = ok(parsed({ amount: 1_000_000 }));
-    expect(planWrites([big!], [existing({ outcome: 1_029_000 })])[0]!.action).toBe('manual-duplicate');
-    expect(planWrites([big!], [existing({ outcome: 1_031_000 })])[0]!.action).toBe('create');
+  describe('сумма, записанная по памяти', () => {
+    const kind = (bank: number, manual: number) => inexactMatch(bank, manual);
+    it('округление вверх некруглой суммы', () => {
+      expect(kind(119600, 120000)).toBe('round-up');
+      expect(kind(369908, 370000)).toBe('round-up');
+      expect(kind(29400, 30000)).toBe('round-up');
+      expect(kind(152324, 152400)).toBe('round-up');
+      expect(kind(152324, 152500)).toBe('round-up');
+      expect(kind(3084912, 3090000)).toBe('round-up');
+    });
+    it('«первые цифры такие»: хвост заменён нулями', () => {
+      expect(kind(111421, 111000)).toBe('first-digits');
+      expect(kind(170025, 170000)).toBe('first-digits');
+      expect(kind(3084912, 3080000)).toBe('first-digits');
+    });
+    it('опечатка: одна цифра или две соседние переставлены, первые три цифры те же', () => {
+      expect(kind(202329, 202239)).toBe('typo');
+      expect(kind(285420, 285470)).toBe('typo');
+      expect(kind(285420, 295420)).toBeUndefined();
+      expect(kind(285420, 285741)).toBeUndefined();
+    });
+    it('круглая сумма банка не округляется — это другая покупка', () => {
+      expect(kind(114000, 115000)).toBeUndefined();
+      expect(kind(269000, 270000)).toBeUndefined();
+      expect(kind(128000, 128800)).toBeUndefined();
+      expect(kind(74000, 74500)).toBeUndefined();
+    });
+    it('грубое округление и просто близкие суммы — не совпадение', () => {
+      expect(kind(285420, 290000)).toBeUndefined(); // до десятков тысяч — остаётся две цифры
+      expect(kind(285420, 287000)).toBeUndefined(); // через одну тысячу
+      expect(kind(285420, 284000)).toBeUndefined();
+      expect(kind(119600, 119000)).toBe('first-digits');
+      expect(kind(119600, 121000)).toBeUndefined();
+      expect(kind(329374, 339000)).toBeUndefined();
+      expect(kind(85300, 85300)).toBeUndefined();
+    });
+    it('в плане: причина названа, круглая сумма создаётся заново', () => {
+      const [odd] = ok(parsed({ amount: 119600 }));
+      expect(planWrites([odd!], [existing({ outcome: 120000 })])[0]).toMatchObject({ action: 'manual-duplicate', fuzzy: true, why: 'round-up' });
+      expect(planWrites([odd!], [existing({ outcome: 121000 })])[0]!.action).toBe('create');
+      expect(planWrites([cand!], [existing({ outcome: 74500 })])[0]!.action).toBe('create');
+      expect(planWrites([cand!], [existing({})])[0]).toMatchObject({ action: 'manual-duplicate', fuzzy: false });
+    });
+    it('из нескольких похожих выбирается округление вверх', () => {
+      const [odd] = ok(parsed({ amount: 119600 }));
+      const d = planWrites([odd!], [existing({ id: 'down', outcome: 119000 }), existing({ id: 'up', outcome: 120000 })])[0]!;
+      expect(d).toMatchObject({ why: 'round-up', match: { id: 'up' } });
+    });
   });
   it('точное совпадение занимает ручную операцию раньше неточного', () => {
-    const [near] = ok(parsed({ orderNumber: '00000000002', amount: 74500 }));
+    const [near] = ok(parsed({ orderNumber: '00000000002', amount: 73600 }));
     const ds = planWrites([near!, cand!], [existing({})]);
     expect(ds.map((d) => d.action)).toEqual(['create', 'manual-duplicate']);
   });

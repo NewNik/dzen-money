@@ -21,9 +21,9 @@ export type Decision =
   /**
    * Похожая операция, внесённая вручную, без маркера [vcb:…], дата ±1 день.
    * `fuzzy: false` — тот же счёт (для расхода — любой из своих) и та же сумма.
-   * `fuzzy: true` — сумма отличается в пределах допуска: вручную суммы округляют и опечатываются.
+   * `fuzzy: true` — сумма записана по памяти (см. `inexactMatch`); `why` — какое именно совпадение.
    */
-  | { action: 'manual-duplicate'; txn: ZenTransaction; match: ExistingTxn; fuzzy: boolean };
+  | { action: 'manual-duplicate'; txn: ZenTransaction; match: ExistingTxn; fuzzy: boolean; why?: InexactKind };
 
 /** `…[vcb:123]` → `vcb:123`; `[vcb:123:fee]` → `vcb:123:fee`. */
 const markerName = (comment: string | null): string | undefined => /\[(vcb:[^\]]+)\]/.exec(comment ?? '')?.[1];
@@ -31,18 +31,57 @@ const markerName = (comment: string | null): string | undefined => /\[(vcb:[^\]]
 const DAY = 86_400_000;
 const dayDiff = (a: string, b: string): number => Math.abs(Date.parse(a) - Date.parse(b)) / DAY;
 
-/** Допуск для неточного совпадения: 3 % суммы, но не меньше 1000. */
-export const fuzzyTolerance = (amount: number): number => Math.max(1000, amount * 0.03);
+export type InexactKind = 'round-up' | 'first-digits' | 'typo';
+
+const INEXACT_TEXT: Record<InexactKind, string> = {
+  'round-up': 'сумма округлена вверх',
+  'first-digits': 'совпадают первые цифры',
+  typo: 'похоже на опечатку в сумме',
+};
+export const inexactText = (k: InexactKind): string => INEXACT_TEXT[k];
+
+/** Шаги округления: мелкие — всегда, крупные — только если от суммы остаётся не меньше трёх первых цифр. */
+const STEPS = [100, 500, 1000, 10_000, 100_000];
 
 /**
- * Разница сумм между кандидатом и ручной операцией по совпадающей стороне; `undefined` — стороны не совпали.
+ * Сумма из письма банка `bank` и сумма, внесённая вручную по памяти, `manual`.
+ * Совпадением считается только одно из трёх, и только когда сумма банка некруглая (не кратна 1000):
+ * круглую сумму запоминают точно, а две разные круглые суммы — это разные покупки.
+ *  - `round-up`: вручную записано округление вверх до 100, 500, 1000 (для сумм от миллиона — и крупнее);
+ *  - `first-digits`: «точно не помню, но первые цифры такие» — первые цифры те же, хвост заменён нулями;
+ *  - `typo`: число той же длины, первые три цифры те же, отличается одна цифра или две соседние переставлены.
+ */
+export function inexactMatch(bank: number, manual: number): InexactKind | undefined {
+  if (!Number.isInteger(bank) || !Number.isInteger(manual) || bank <= 0 || manual <= 0) return undefined;
+  if (bank === manual || bank % 1000 === 0) return undefined;
+  for (const step of STEPS) {
+    if (bank % step === 0 || manual % step !== 0) continue;
+    if (step > 1000 && bank < step * 100) continue;
+    const down = Math.floor(bank / step) * step;
+    if (manual === down + step) return 'round-up';
+    if (manual === down && down > 0) return 'first-digits';
+  }
+  const b = String(bank);
+  const m = String(manual);
+  if (b.length !== m.length || b.length < 5 || b.slice(0, 3) !== m.slice(0, 3)) return undefined;
+  const diff: number[] = [];
+  for (let i = 0; i < b.length; i++) if (b[i] !== m[i]) diff.push(i);
+  if (diff.length === 1) return 'typo';
+  if (diff.length === 2 && diff[1] === diff[0]! + 1 && b[diff[0]!] === m[diff[1]!] && b[diff[1]!] === m[diff[0]!]) return 'typo';
+  return undefined;
+}
+
+const KIND_RANK: Record<InexactKind, number> = { 'round-up': 0, 'first-digits': 1, typo: 2 };
+
+/**
+ * Сумма ручной операции по стороне, совпадающей с кандидатом; `undefined` — стороны не совпали.
  * Расход сверяется по любому из своих счетов (`own`): его могли записать на счёт второго владельца.
  */
-function sideDiff(c: ZenTransaction, e: ExistingTxn, own: ReadonlySet<string>): number | undefined {
+function sideAmount(c: ZenTransaction, e: ExistingTxn, own: ReadonlySet<string>): number | undefined {
   const isExpense = c.outcome > 0 && c.income === 0;
   const sameOut = e.outcomeAccount === c.outcomeAccount || (isExpense && own.has(c.outcomeAccount) && own.has(e.outcomeAccount));
-  if (c.outcome > 0 && e.outcome > 0 && sameOut) return Math.abs(e.outcome - c.outcome);
-  if (c.income > 0 && e.income > 0 && e.incomeAccount === c.incomeAccount) return Math.abs(e.income - c.income);
+  if (c.outcome > 0 && e.outcome > 0 && sameOut) return e.outcome;
+  if (c.income > 0 && e.income > 0 && e.incomeAccount === c.incomeAccount) return e.income;
   return undefined;
 }
 
@@ -63,15 +102,20 @@ export function planWrites(
   const manual = existing.filter((e) => !e.deleted && !(e.comment ?? '').includes('[vcb:'));
   const used = new Set<string>(); // одна ручная операция закрывает не больше одной из писем
   const amountOf = (t: ZenTransaction): number => t.outcome || t.income;
-  const findManual = (txn: ZenTransaction, fuzzy: boolean): ExistingTxn | undefined => {
-    let best: { m: ExistingTxn; diff: number } | undefined;
+  const findExact = (txn: ZenTransaction): ExistingTxn | undefined =>
+    manual.find((m) => !used.has(m.id) && dayDiff(m.date, txn.date) <= 1 && sideAmount(txn, m, ownAccounts) === amountOf(txn));
+  const findInexact = (txn: ZenTransaction): { m: ExistingTxn; why: InexactKind } | undefined => {
+    let best: { m: ExistingTxn; why: InexactKind; diff: number } | undefined;
     for (const m of manual) {
       if (used.has(m.id) || dayDiff(m.date, txn.date) > 1) continue;
-      const diff = sideDiff(txn, m, ownAccounts);
-      if (diff === undefined || (fuzzy ? diff === 0 || diff > fuzzyTolerance(amountOf(txn)) : diff !== 0)) continue;
-      if (!best || diff < best.diff) best = { m, diff };
+      const amount = sideAmount(txn, m, ownAccounts);
+      const why = amount === undefined ? undefined : inexactMatch(amountOf(txn), amount);
+      if (amount === undefined || !why) continue;
+      const diff = Math.abs(amount - amountOf(txn));
+      const better = !best || KIND_RANK[why] < KIND_RANK[best.why] || (why === best.why && diff < best.diff);
+      if (better) best = { m, why, diff };
     }
-    return best?.m;
+    return best;
   };
   // Первый проход: решения без неточных совпадений. Точные совпадения по всей пачке занимают ручные операции раньше неточных.
   const first = candidates.map((txn): Decision | null => {
@@ -85,21 +129,21 @@ export function planWrites(
       return { action: 'restore', txn: { ...txn, id: uuidv5(`${name}:r${n}`) } };
     }
     if (redo.has(txn.id)) return { action: 'create', txn };
-    const match = findManual(txn, false);
+    const match = findExact(txn);
     if (match) {
       used.add(match.id);
       return { action: 'manual-duplicate', txn, match, fuzzy: false };
     }
     return null;
   });
-  // Второй проход: для оставшихся — неточное совпадение. Комиссии не сверяем: вручную их отдельно не вносят.
+  // Второй проход: для оставшихся — сумма, записанная по памяти. Комиссии не сверяем: вручную их отдельно не вносят.
   return first.map((d, i): Decision => {
     if (d) return d;
     const txn = candidates[i]!;
-    const match = /:fee\]/.test(txn.comment ?? '') ? undefined : findManual(txn, true);
-    if (match) {
-      used.add(match.id);
-      return { action: 'manual-duplicate', txn, match, fuzzy: true };
+    const found = /:fee\]/.test(txn.comment ?? '') ? undefined : findInexact(txn);
+    if (found) {
+      used.add(found.m.id);
+      return { action: 'manual-duplicate', txn, match: found.m, fuzzy: true, why: found.why };
     }
     return { action: 'create', txn };
   });

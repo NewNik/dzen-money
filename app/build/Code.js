@@ -450,12 +450,38 @@ var ZenApp = (() => {
   var markerName = (comment) => /\[(vcb:[^\]]+)\]/.exec(comment ?? "")?.[1];
   var DAY = 864e5;
   var dayDiff = (a, b) => Math.abs(Date.parse(a) - Date.parse(b)) / DAY;
-  var fuzzyTolerance = (amount) => Math.max(1e3, amount * 0.03);
-  function sideDiff(c, e, own) {
+  var INEXACT_TEXT = {
+    "round-up": "сумма округлена вверх",
+    "first-digits": "совпадают первые цифры",
+    typo: "похоже на опечатку в сумме"
+  };
+  var inexactText = (k) => INEXACT_TEXT[k];
+  var STEPS = [100, 500, 1e3, 1e4, 1e5];
+  function inexactMatch(bank, manual) {
+    if (!Number.isInteger(bank) || !Number.isInteger(manual) || bank <= 0 || manual <= 0) return void 0;
+    if (bank === manual || bank % 1e3 === 0) return void 0;
+    for (const step of STEPS) {
+      if (bank % step === 0 || manual % step !== 0) continue;
+      if (step > 1e3 && bank < step * 100) continue;
+      const down = Math.floor(bank / step) * step;
+      if (manual === down + step) return "round-up";
+      if (manual === down && down > 0) return "first-digits";
+    }
+    const b = String(bank);
+    const m = String(manual);
+    if (b.length !== m.length || b.length < 5 || b.slice(0, 3) !== m.slice(0, 3)) return void 0;
+    const diff = [];
+    for (let i = 0; i < b.length; i++) if (b[i] !== m[i]) diff.push(i);
+    if (diff.length === 1) return "typo";
+    if (diff.length === 2 && diff[1] === diff[0] + 1 && b[diff[0]] === m[diff[1]] && b[diff[1]] === m[diff[0]]) return "typo";
+    return void 0;
+  }
+  var KIND_RANK = { "round-up": 0, "first-digits": 1, typo: 2 };
+  function sideAmount(c, e, own) {
     const isExpense = c.outcome > 0 && c.income === 0;
     const sameOut = e.outcomeAccount === c.outcomeAccount || isExpense && own.has(c.outcomeAccount) && own.has(e.outcomeAccount);
-    if (c.outcome > 0 && e.outcome > 0 && sameOut) return Math.abs(e.outcome - c.outcome);
-    if (c.income > 0 && e.income > 0 && e.incomeAccount === c.incomeAccount) return Math.abs(e.income - c.income);
+    if (c.outcome > 0 && e.outcome > 0 && sameOut) return e.outcome;
+    if (c.income > 0 && e.income > 0 && e.incomeAccount === c.incomeAccount) return e.income;
     return void 0;
   }
   function planWrites(candidates, existing, redo = /* @__PURE__ */ new Set(), ownAccounts = /* @__PURE__ */ new Set()) {
@@ -464,15 +490,19 @@ var ZenApp = (() => {
     const manual = existing.filter((e) => !e.deleted && !(e.comment ?? "").includes("[vcb:"));
     const used = /* @__PURE__ */ new Set();
     const amountOf = (t) => t.outcome || t.income;
-    const findManual = (txn, fuzzy) => {
+    const findExact = (txn) => manual.find((m) => !used.has(m.id) && dayDiff(m.date, txn.date) <= 1 && sideAmount(txn, m, ownAccounts) === amountOf(txn));
+    const findInexact = (txn) => {
       let best;
       for (const m of manual) {
         if (used.has(m.id) || dayDiff(m.date, txn.date) > 1) continue;
-        const diff = sideDiff(txn, m, ownAccounts);
-        if (diff === void 0 || (fuzzy ? diff === 0 || diff > fuzzyTolerance(amountOf(txn)) : diff !== 0)) continue;
-        if (!best || diff < best.diff) best = { m, diff };
+        const amount = sideAmount(txn, m, ownAccounts);
+        const why = amount === void 0 ? void 0 : inexactMatch(amountOf(txn), amount);
+        if (amount === void 0 || !why) continue;
+        const diff = Math.abs(amount - amountOf(txn));
+        const better = !best || KIND_RANK[why] < KIND_RANK[best.why] || why === best.why && diff < best.diff;
+        if (better) best = { m, why, diff };
       }
-      return best?.m;
+      return best;
     };
     const first = candidates.map((txn) => {
       const e = byId.get(txn.id);
@@ -485,7 +515,7 @@ var ZenApp = (() => {
         return { action: "restore", txn: { ...txn, id: uuidv5(`${name}:r${n}`) } };
       }
       if (redo.has(txn.id)) return { action: "create", txn };
-      const match = findManual(txn, false);
+      const match = findExact(txn);
       if (match) {
         used.add(match.id);
         return { action: "manual-duplicate", txn, match, fuzzy: false };
@@ -495,10 +525,10 @@ var ZenApp = (() => {
     return first.map((d, i) => {
       if (d) return d;
       const txn = candidates[i];
-      const match = /:fee\]/.test(txn.comment ?? "") ? void 0 : findManual(txn, true);
-      if (match) {
-        used.add(match.id);
-        return { action: "manual-duplicate", txn, match, fuzzy: true };
+      const found = /:fee\]/.test(txn.comment ?? "") ? void 0 : findInexact(txn);
+      if (found) {
+        used.add(found.m.id);
+        return { action: "manual-duplicate", txn, match: found.m, fuzzy: true, why: found.why };
       }
       return { action: "create", txn };
     });
@@ -644,7 +674,7 @@ var ZenApp = (() => {
         plans.set(m.msgId, {
           msgId: m.msgId,
           status: "duplicate",
-          reason: `похожая ручная операция ${dup.match.date} на ${amount} (id ${dup.match.id})` + (dup.fuzzy ? " — сумма отличается, проверить" : ""),
+          reason: `похожая ручная операция ${dup.match.date} на ${amount} (id ${dup.match.id})` + (dup.fuzzy ? ` — ${dup.why ? inexactText(dup.why) : "сумма отличается"}, проверить` : ""),
           decisions: ds,
           creates: []
         });

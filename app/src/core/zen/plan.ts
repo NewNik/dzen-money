@@ -1,6 +1,6 @@
 // Решение по пачке разобранных писем: что создать в Дзен-мани и с каким итогом пометить письмо.
 import type { ParsedBankTxn, ZenTransaction } from '../types';
-import { planWrites, type Decision, type ExistingTxn } from './dedup';
+import { inexactText, planWrites, type Decision, type ExistingTxn } from './dedup';
 import { toZenTransactions, type ZenContext } from './mapper';
 import { vcbTxnId } from '../uuid';
 
@@ -68,7 +68,7 @@ export function planMessages(
         status: 'duplicate',
         reason:
           `похожая ручная операция ${dup.match.date} на ${amount} (id ${dup.match.id})` +
-          (dup.fuzzy ? ' — сумма отличается, проверить' : ''),
+          (dup.fuzzy ? ` — ${dup.why ? inexactText(dup.why) : 'сумма отличается'}, проверить` : ''),
         decisions: ds,
         creates: [],
       });
