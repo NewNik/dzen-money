@@ -185,10 +185,13 @@ describe('проверка дублей', () => {
     it('округление вверх: должен быть разряд, который округляется', () => {
       expect(kind(267000, 270000)).toBe('round-up'); // 67 → 70
       expect(kind(269000, 270000)).toBe('round-up');
-      expect(kind(265000, 270000)).toBe('round-up'); // ровно середина
+      expect(kind(265000, 270000)).toBeUndefined(); // 5000 — больше порога 3000
+      expect(kind(268000, 270000)).toBe('round-up');
       expect(kind(114000, 115000)).toBe('round-up'); // до пятёрки
       expect(kind(267400, 270000)).toBe('round-up');
-      expect(kind(1460000, 1500000)).toBe('round-up');
+      expect(kind(266999, 270000)).toBeUndefined(); // 3001
+      expect(kind(1460000, 1500000)).toBeUndefined();
+      expect(kind(1498000, 1500000)).toBe('round-up');
       expect(kind(203000, 206000)).toBeUndefined(); // 206 не ровнее, чем 203
       expect(kind(262000, 270000)).toBeUndefined(); // далеко: скажут 260 или 265
       expect(kind(203000, 210000)).toBeUndefined();
@@ -201,12 +204,13 @@ describe('проверка дублей', () => {
       expect(kind(33000, 35000)).toBeUndefined();
       expect(kind(74000, 75000)).toBeUndefined(); // для пятёрок порог строже
       expect(kind(19000, 20000)).toBeUndefined();
-      expect(kind(95000, 100000)).toBe('round-up');
+      expect(kind(95000, 100000)).toBeUndefined();
+      expect(kind(98000, 100000)).toBe('round-up');
       expect(kind(74000, 74500)).toBeUndefined();
     });
     it('грубое округление и просто близкие суммы — не совпадение', () => {
-      expect(kind(285420, 290000)).toBe('round-up'); // 85 → 90, ближе половины десятки
-      expect(kind(283420, 290000)).toBeUndefined(); // дальше половины десятки
+      expect(kind(285420, 290000)).toBeUndefined(); // 4580 — больше порога 3000
+      expect(kind(287420, 290000)).toBe('round-up');
       expect(kind(285420, 287000)).toBeUndefined(); // через одну тысячу
       expect(kind(285420, 284000)).toBeUndefined();
       expect(kind(119600, 119000)).toBe('first-digits');

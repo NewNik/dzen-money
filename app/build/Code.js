@@ -456,6 +456,7 @@ var ZenApp = (() => {
     typo: "похоже на опечатку в сумме"
   };
   var inexactText = (k) => INEXACT_TEXT[k];
+  var ROUND_UP_MAX = 3e3;
   var UNITS = [];
   for (let p = 100; p <= 1e7; p *= 10) UNITS.push(p, p * 5);
   function isRoundedUp(bank, manual) {
@@ -465,7 +466,8 @@ var ZenApp = (() => {
       if (manual !== Math.ceil(bank / unit) * unit) continue;
       if (unit <= 1e3) return true;
       const isFive = String(unit)[0] === "5";
-      if (manual - bank <= unit / 2 && manual / unit >= (isFive ? 20 : 10)) return true;
+      const over = manual - bank;
+      if (over <= ROUND_UP_MAX && over <= unit / 2 && manual / unit >= (isFive ? 20 : 10)) return true;
     }
     return false;
   }
