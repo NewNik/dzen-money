@@ -181,10 +181,16 @@ describe('проверка дублей', () => {
       expect(kind(285420, 295420)).toBeUndefined();
       expect(kind(285420, 285741)).toBeUndefined();
     });
-    it('круглая сумма банка не округляется — это другая покупка', () => {
-      expect(kind(114000, 115000)).toBeUndefined();
-      expect(kind(269000, 270000)).toBeUndefined();
-      expect(kind(128000, 128800)).toBeUndefined();
+    it('круглая сумма банка: только вверх, не больше 3000 и 3 %', () => {
+      expect(kind(114000, 115000)).toBe('round-sum-up');
+      expect(kind(269000, 270000)).toBe('round-sum-up');
+      expect(kind(203000, 206000)).toBe('round-sum-up');
+      expect(kind(203000, 207000)).toBeUndefined(); // больше 3000
+      expect(kind(269000, 268000)).toBeUndefined(); // вниз
+      expect(kind(128000, 128800)).toBeUndefined(); // записана некруглая
+      expect(kind(30000, 33000)).toBeUndefined(); // 10 % — другая покупка
+      expect(kind(33000, 34000)).toBeUndefined(); // 3,03 %
+      expect(kind(70000, 72000)).toBe('round-sum-up');
       expect(kind(74000, 74500)).toBeUndefined();
     });
     it('грубое округление и просто близкие суммы — не совпадение', () => {
@@ -201,6 +207,8 @@ describe('проверка дублей', () => {
       expect(planWrites([odd!], [existing({ outcome: 120000 })])[0]).toMatchObject({ action: 'manual-duplicate', fuzzy: true, why: 'round-up' });
       expect(planWrites([odd!], [existing({ outcome: 121000 })])[0]!.action).toBe('create');
       expect(planWrites([cand!], [existing({ outcome: 74500 })])[0]!.action).toBe('create');
+      expect(planWrites([cand!], [existing({ outcome: 76000 })])[0]).toMatchObject({ action: 'manual-duplicate', why: 'round-sum-up' });
+      expect(planWrites([cand!], [existing({ outcome: 78000 })])[0]!.action).toBe('create');
       expect(planWrites([cand!], [existing({})])[0]).toMatchObject({ action: 'manual-duplicate', fuzzy: false });
     });
     it('из нескольких похожих выбирается округление вверх', () => {

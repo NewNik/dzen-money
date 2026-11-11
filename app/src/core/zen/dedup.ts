@@ -31,29 +31,41 @@ const markerName = (comment: string | null): string | undefined => /\[(vcb:[^\]]
 const DAY = 86_400_000;
 const dayDiff = (a: string, b: string): number => Math.abs(Date.parse(a) - Date.parse(b)) / DAY;
 
-export type InexactKind = 'round-up' | 'first-digits' | 'typo';
+export type InexactKind = 'round-up' | 'first-digits' | 'typo' | 'round-sum-up';
 
 const INEXACT_TEXT: Record<InexactKind, string> = {
   'round-up': 'сумма округлена вверх',
   'first-digits': 'совпадают первые цифры',
   typo: 'похоже на опечатку в сумме',
+  'round-sum-up': 'круглая сумма записана чуть больше',
 };
 export const inexactText = (k: InexactKind): string => INEXACT_TEXT[k];
+
+/** Круглая сумма банка: насколько больше может быть записано вручную — в донгах и долей суммы. */
+const ROUND_SUM_MAX = 3000;
+const ROUND_SUM_SHARE = 0.03;
 
 /** Шаги округления: мелкие — всегда, крупные — только если от суммы остаётся не меньше трёх первых цифр. */
 const STEPS = [100, 500, 1000, 10_000, 100_000];
 
 /**
  * Сумма из письма банка `bank` и сумма, внесённая вручную по памяти, `manual`.
- * Совпадением считается только одно из трёх, и только когда сумма банка некруглая (не кратна 1000):
- * круглую сумму запоминают точно, а две разные круглые суммы — это разные покупки.
+ * Когда сумма банка некруглая (не кратна 1000), совпадением считается одно из трёх:
  *  - `round-up`: вручную записано округление вверх до 100, 500, 1000 (для сумм от миллиона — и крупнее);
  *  - `first-digits`: «точно не помню, но первые цифры такие» — первые цифры те же, хвост заменён нулями;
  *  - `typo`: число той же длины, первые три цифры те же, отличается одна цифра или две соседние переставлены.
+ * Когда сумма банка круглая, её обычно помнят точно, поэтому вариант один и узкий:
+ *  - `round-sum-up`: вручную записана круглая сумма больше не более чем на 3000 и не более чем на 3 %
+ *    (269 000 → 270 000). Вниз и для мелких сумм (30 000 → 33 000) не действует — это разные покупки.
  */
 export function inexactMatch(bank: number, manual: number): InexactKind | undefined {
   if (!Number.isInteger(bank) || !Number.isInteger(manual) || bank <= 0 || manual <= 0) return undefined;
-  if (bank === manual || bank % 1000 === 0) return undefined;
+  if (bank === manual) return undefined;
+  if (bank % 1000 === 0) {
+    const over = manual - bank;
+    const ok = manual % 1000 === 0 && over > 0 && over <= ROUND_SUM_MAX && over <= bank * ROUND_SUM_SHARE;
+    return ok ? 'round-sum-up' : undefined;
+  }
   for (const step of STEPS) {
     if (bank % step === 0 || manual % step !== 0) continue;
     if (step > 1000 && bank < step * 100) continue;
@@ -71,7 +83,7 @@ export function inexactMatch(bank: number, manual: number): InexactKind | undefi
   return undefined;
 }
 
-const KIND_RANK: Record<InexactKind, number> = { 'round-up': 0, 'first-digits': 1, typo: 2 };
+const KIND_RANK: Record<InexactKind, number> = { 'round-up': 0, 'first-digits': 1, typo: 2, 'round-sum-up': 3 };
 
 /**
  * Сумма ручной операции по стороне, совпадающей с кандидатом; `undefined` — стороны не совпали.

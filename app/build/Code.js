@@ -453,13 +453,21 @@ var ZenApp = (() => {
   var INEXACT_TEXT = {
     "round-up": "сумма округлена вверх",
     "first-digits": "совпадают первые цифры",
-    typo: "похоже на опечатку в сумме"
+    typo: "похоже на опечатку в сумме",
+    "round-sum-up": "круглая сумма записана чуть больше"
   };
   var inexactText = (k) => INEXACT_TEXT[k];
+  var ROUND_SUM_MAX = 3e3;
+  var ROUND_SUM_SHARE = 0.03;
   var STEPS = [100, 500, 1e3, 1e4, 1e5];
   function inexactMatch(bank, manual) {
     if (!Number.isInteger(bank) || !Number.isInteger(manual) || bank <= 0 || manual <= 0) return void 0;
-    if (bank === manual || bank % 1e3 === 0) return void 0;
+    if (bank === manual) return void 0;
+    if (bank % 1e3 === 0) {
+      const over = manual - bank;
+      const ok = manual % 1e3 === 0 && over > 0 && over <= ROUND_SUM_MAX && over <= bank * ROUND_SUM_SHARE;
+      return ok ? "round-sum-up" : void 0;
+    }
     for (const step of STEPS) {
       if (bank % step === 0 || manual % step !== 0) continue;
       if (step > 1e3 && bank < step * 100) continue;
@@ -476,7 +484,7 @@ var ZenApp = (() => {
     if (diff.length === 2 && diff[1] === diff[0] + 1 && b[diff[0]] === m[diff[1]] && b[diff[1]] === m[diff[0]]) return "typo";
     return void 0;
   }
-  var KIND_RANK = { "round-up": 0, "first-digits": 1, typo: 2 };
+  var KIND_RANK = { "round-up": 0, "first-digits": 1, typo: 2, "round-sum-up": 3 };
   function sideAmount(c, e, own) {
     const isExpense = c.outcome > 0 && c.income === 0;
     const sameOut = e.outcomeAccount === c.outcomeAccount || isExpense && own.has(c.outcomeAccount) && own.has(e.outcomeAccount);
