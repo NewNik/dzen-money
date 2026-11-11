@@ -31,59 +31,83 @@ const markerName = (comment: string | null): string | undefined => /\[(vcb:[^\]]
 const DAY = 86_400_000;
 const dayDiff = (a: string, b: string): number => Math.abs(Date.parse(a) - Date.parse(b)) / DAY;
 
-export type InexactKind = 'round-up' | 'first-digits' | 'typo' | 'round-sum-up';
+export type InexactKind = 'round-up' | 'first-digits' | 'typo';
 
 const INEXACT_TEXT: Record<InexactKind, string> = {
   'round-up': 'сумма округлена вверх',
   'first-digits': 'совпадают первые цифры',
   typo: 'похоже на опечатку в сумме',
-  'round-sum-up': 'круглая сумма записана чуть больше',
 };
 export const inexactText = (k: InexactKind): string => INEXACT_TEXT[k];
 
-/** Круглая сумма банка: насколько больше может быть записано вручную — в донгах и долей суммы. */
-const ROUND_SUM_MAX = 3000;
-const ROUND_SUM_SHARE = 0.03;
+/** Единицы, до которых округляют в уме: 100, 500, 1000, 5000, 10 000, 50 000, … */
+const UNITS: number[] = [];
+for (let p = 100; p <= 10_000_000; p *= 10) UNITS.push(p, p * 5);
 
-/** Шаги округления: мелкие — всегда, крупные — только если от суммы остаётся не меньше трёх первых цифр. */
-const STEPS = [100, 500, 1000, 10_000, 100_000];
+/**
+ * Могли ли записать `manual`, округлив в уме `bank` вверх.
+ *
+ * Человек округляет, когда у суммы есть «неровный» разряд: 267 → 270, 119 600 → 120 000.
+ * Записанная сумма должна быть ровнее настоящей — ближайшим сверху кратным единицы округления.
+ * 203 000 → 206 000 не подходит: 206 ничуть не ровнее, чем 203, такого округления не бывает.
+ *
+ *  - Хвост меньше тысячи отбрасывают вверх всегда: 29 400 → 30 000.
+ *  - Тысячи и крупнее округляют вверх, только если до ровного числа не дальше половины единицы:
+ *    267 → 270 да, 262 → 270 нет (скорее скажут 260 или 265).
+ *  - От суммы должны остаться хотя бы две значащие цифры: 267 → 270 да, 67 → 70 нет —
+ *    мелкие суммы помнят точно, а соседние цены (33 и 35 тысяч) встречаются слишком часто.
+ *    Для округления до «пятёрок» порог строже: 114 → 115 да, 74 → 75 нет.
+ */
+export function isRoundedUp(bank: number, manual: number): boolean {
+  if (manual <= bank) return false;
+  for (const unit of UNITS) {
+    if (bank % unit === 0 || manual % unit !== 0) continue;
+    if (manual !== Math.ceil(bank / unit) * unit) continue;
+    if (unit <= 1000) return true;
+    const isFive = String(unit)[0] === '5';
+    if (manual - bank <= unit / 2 && manual / unit >= (isFive ? 20 : 10)) return true;
+  }
+  return false;
+}
+
+/** «Точно не помню, но первые цифры такие»: первые цифры те же (не меньше трёх либо все до тысяч), хвост — нули. */
+function isFirstDigits(bank: number, manual: number): boolean {
+  for (const unit of UNITS) {
+    if (bank % unit === 0 || manual % unit !== 0 || String(unit)[0] === '5') continue;
+    if (unit > 1000 && bank < unit * 100) continue;
+    const down = Math.floor(bank / unit) * unit;
+    if (down > 0 && manual === down) return true;
+  }
+  return false;
+}
+
+/** Опечатка: число той же длины, первые три цифры те же, отличается одна цифра или переставлены две соседние. */
+function isTypo(bank: number, manual: number): boolean {
+  const b = String(bank);
+  const m = String(manual);
+  if (b.length !== m.length || b.length < 5 || b.slice(0, 3) !== m.slice(0, 3)) return false;
+  const diff: number[] = [];
+  for (let i = 0; i < b.length; i++) if (b[i] !== m[i]) diff.push(i);
+  if (diff.length === 1) return true;
+  return diff.length === 2 && diff[1] === diff[0]! + 1 && b[diff[0]!] === m[diff[1]!] && b[diff[1]!] === m[diff[0]!];
+}
 
 /**
  * Сумма из письма банка `bank` и сумма, внесённая вручную по памяти, `manual`.
- * Когда сумма банка некруглая (не кратна 1000), совпадением считается одно из трёх:
- *  - `round-up`: вручную записано округление вверх до 100, 500, 1000 (для сумм от миллиона — и крупнее);
- *  - `first-digits`: «точно не помню, но первые цифры такие» — первые цифры те же, хвост заменён нулями;
- *  - `typo`: число той же длины, первые три цифры те же, отличается одна цифра или две соседние переставлены.
- * Когда сумма банка круглая, её обычно помнят точно, поэтому вариант один и узкий:
- *  - `round-sum-up`: вручную записана круглая сумма больше не более чем на 3000 и не более чем на 3 %
- *    (269 000 → 270 000). Вниз и для мелких сумм (30 000 → 33 000) не действует — это разные покупки.
+ *  - `round-up` — округление вверх (см. `isRoundedUp`), для любых сумм;
+ *  - `first-digits` и `typo` — только когда сумма банка некруглая (не кратна 1000): круглую сумму
+ *    помнят точно, и другая круглая сумма рядом — это другая покупка.
  */
 export function inexactMatch(bank: number, manual: number): InexactKind | undefined {
-  if (!Number.isInteger(bank) || !Number.isInteger(manual) || bank <= 0 || manual <= 0) return undefined;
-  if (bank === manual) return undefined;
-  if (bank % 1000 === 0) {
-    const over = manual - bank;
-    const ok = manual % 1000 === 0 && over > 0 && over <= ROUND_SUM_MAX && over <= bank * ROUND_SUM_SHARE;
-    return ok ? 'round-sum-up' : undefined;
-  }
-  for (const step of STEPS) {
-    if (bank % step === 0 || manual % step !== 0) continue;
-    if (step > 1000 && bank < step * 100) continue;
-    const down = Math.floor(bank / step) * step;
-    if (manual === down + step) return 'round-up';
-    if (manual === down && down > 0) return 'first-digits';
-  }
-  const b = String(bank);
-  const m = String(manual);
-  if (b.length !== m.length || b.length < 5 || b.slice(0, 3) !== m.slice(0, 3)) return undefined;
-  const diff: number[] = [];
-  for (let i = 0; i < b.length; i++) if (b[i] !== m[i]) diff.push(i);
-  if (diff.length === 1) return 'typo';
-  if (diff.length === 2 && diff[1] === diff[0]! + 1 && b[diff[0]!] === m[diff[1]!] && b[diff[1]!] === m[diff[0]!]) return 'typo';
+  if (!Number.isInteger(bank) || !Number.isInteger(manual) || bank <= 0 || manual <= 0 || bank === manual) return undefined;
+  if (isRoundedUp(bank, manual)) return 'round-up';
+  if (bank % 1000 === 0) return undefined;
+  if (isFirstDigits(bank, manual)) return 'first-digits';
+  if (isTypo(bank, manual)) return 'typo';
   return undefined;
 }
 
-const KIND_RANK: Record<InexactKind, number> = { 'round-up': 0, 'first-digits': 1, typo: 2, 'round-sum-up': 3 };
+const KIND_RANK: Record<InexactKind, number> = { 'round-up': 0, 'first-digits': 1, typo: 2 };
 
 /**
  * Сумма ручной операции по стороне, совпадающей с кандидатом; `undefined` — стороны не совпали.

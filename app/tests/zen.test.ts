@@ -168,7 +168,8 @@ describe('проверка дублей', () => {
       expect(kind(29400, 30000)).toBe('round-up');
       expect(kind(152324, 152400)).toBe('round-up');
       expect(kind(152324, 152500)).toBe('round-up');
-      expect(kind(3084912, 3090000)).toBe('round-up');
+      expect(kind(3084912, 3085000)).toBe('round-up');
+      expect(kind(3084912, 3090000)).toBeUndefined(); // 84,9 → 90 дальше половины десятки
     });
     it('«первые цифры такие»: хвост заменён нулями', () => {
       expect(kind(111421, 111000)).toBe('first-digits');
@@ -181,20 +182,31 @@ describe('проверка дублей', () => {
       expect(kind(285420, 295420)).toBeUndefined();
       expect(kind(285420, 285741)).toBeUndefined();
     });
-    it('круглая сумма банка: только вверх, не больше 3000 и 3 %', () => {
-      expect(kind(114000, 115000)).toBe('round-sum-up');
-      expect(kind(269000, 270000)).toBe('round-sum-up');
-      expect(kind(203000, 206000)).toBe('round-sum-up');
-      expect(kind(203000, 207000)).toBeUndefined(); // больше 3000
+    it('округление вверх: должен быть разряд, который округляется', () => {
+      expect(kind(267000, 270000)).toBe('round-up'); // 67 → 70
+      expect(kind(269000, 270000)).toBe('round-up');
+      expect(kind(265000, 270000)).toBe('round-up'); // ровно середина
+      expect(kind(114000, 115000)).toBe('round-up'); // до пятёрки
+      expect(kind(267400, 270000)).toBe('round-up');
+      expect(kind(1460000, 1500000)).toBe('round-up');
+      expect(kind(203000, 206000)).toBeUndefined(); // 206 не ровнее, чем 203
+      expect(kind(262000, 270000)).toBeUndefined(); // далеко: скажут 260 или 265
+      expect(kind(203000, 210000)).toBeUndefined();
+      expect(kind(262000, 265000)).toBeUndefined(); // дальше половины пятёрки
       expect(kind(269000, 268000)).toBeUndefined(); // вниз
-      expect(kind(128000, 128800)).toBeUndefined(); // записана некруглая
-      expect(kind(30000, 33000)).toBeUndefined(); // 10 % — другая покупка
-      expect(kind(33000, 34000)).toBeUndefined(); // 3,03 %
-      expect(kind(70000, 72000)).toBe('round-sum-up');
+      expect(kind(128000, 128800)).toBeUndefined();
+    });
+    it('мелкие суммы помнят точно: остаётся меньше двух значащих цифр', () => {
+      expect(kind(67000, 70000)).toBeUndefined();
+      expect(kind(33000, 35000)).toBeUndefined();
+      expect(kind(74000, 75000)).toBeUndefined(); // для пятёрок порог строже
+      expect(kind(19000, 20000)).toBeUndefined();
+      expect(kind(95000, 100000)).toBe('round-up');
       expect(kind(74000, 74500)).toBeUndefined();
     });
     it('грубое округление и просто близкие суммы — не совпадение', () => {
-      expect(kind(285420, 290000)).toBeUndefined(); // до десятков тысяч — остаётся две цифры
+      expect(kind(285420, 290000)).toBe('round-up'); // 85 → 90, ближе половины десятки
+      expect(kind(283420, 290000)).toBeUndefined(); // дальше половины десятки
       expect(kind(285420, 287000)).toBeUndefined(); // через одну тысячу
       expect(kind(285420, 284000)).toBeUndefined();
       expect(kind(119600, 119000)).toBe('first-digits');
@@ -207,8 +219,9 @@ describe('проверка дублей', () => {
       expect(planWrites([odd!], [existing({ outcome: 120000 })])[0]).toMatchObject({ action: 'manual-duplicate', fuzzy: true, why: 'round-up' });
       expect(planWrites([odd!], [existing({ outcome: 121000 })])[0]!.action).toBe('create');
       expect(planWrites([cand!], [existing({ outcome: 74500 })])[0]!.action).toBe('create');
-      expect(planWrites([cand!], [existing({ outcome: 76000 })])[0]).toMatchObject({ action: 'manual-duplicate', why: 'round-sum-up' });
-      expect(planWrites([cand!], [existing({ outcome: 78000 })])[0]!.action).toBe('create');
+      const [big] = ok(parsed({ amount: 267000 }));
+      expect(planWrites([big!], [existing({ outcome: 270000 })])[0]).toMatchObject({ action: 'manual-duplicate', why: 'round-up' });
+      expect(planWrites([big!], [existing({ outcome: 269000 })])[0]!.action).toBe('create');
       expect(planWrites([cand!], [existing({})])[0]).toMatchObject({ action: 'manual-duplicate', fuzzy: false });
     });
     it('из нескольких похожих выбирается округление вверх', () => {

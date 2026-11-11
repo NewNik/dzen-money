@@ -453,38 +453,49 @@ var ZenApp = (() => {
   var INEXACT_TEXT = {
     "round-up": "сумма округлена вверх",
     "first-digits": "совпадают первые цифры",
-    typo: "похоже на опечатку в сумме",
-    "round-sum-up": "круглая сумма записана чуть больше"
+    typo: "похоже на опечатку в сумме"
   };
   var inexactText = (k) => INEXACT_TEXT[k];
-  var ROUND_SUM_MAX = 3e3;
-  var ROUND_SUM_SHARE = 0.03;
-  var STEPS = [100, 500, 1e3, 1e4, 1e5];
-  function inexactMatch(bank, manual) {
-    if (!Number.isInteger(bank) || !Number.isInteger(manual) || bank <= 0 || manual <= 0) return void 0;
-    if (bank === manual) return void 0;
-    if (bank % 1e3 === 0) {
-      const over = manual - bank;
-      const ok = manual % 1e3 === 0 && over > 0 && over <= ROUND_SUM_MAX && over <= bank * ROUND_SUM_SHARE;
-      return ok ? "round-sum-up" : void 0;
+  var UNITS = [];
+  for (let p = 100; p <= 1e7; p *= 10) UNITS.push(p, p * 5);
+  function isRoundedUp(bank, manual) {
+    if (manual <= bank) return false;
+    for (const unit of UNITS) {
+      if (bank % unit === 0 || manual % unit !== 0) continue;
+      if (manual !== Math.ceil(bank / unit) * unit) continue;
+      if (unit <= 1e3) return true;
+      const isFive = String(unit)[0] === "5";
+      if (manual - bank <= unit / 2 && manual / unit >= (isFive ? 20 : 10)) return true;
     }
-    for (const step of STEPS) {
-      if (bank % step === 0 || manual % step !== 0) continue;
-      if (step > 1e3 && bank < step * 100) continue;
-      const down = Math.floor(bank / step) * step;
-      if (manual === down + step) return "round-up";
-      if (manual === down && down > 0) return "first-digits";
+    return false;
+  }
+  function isFirstDigits(bank, manual) {
+    for (const unit of UNITS) {
+      if (bank % unit === 0 || manual % unit !== 0 || String(unit)[0] === "5") continue;
+      if (unit > 1e3 && bank < unit * 100) continue;
+      const down = Math.floor(bank / unit) * unit;
+      if (down > 0 && manual === down) return true;
     }
+    return false;
+  }
+  function isTypo(bank, manual) {
     const b = String(bank);
     const m = String(manual);
-    if (b.length !== m.length || b.length < 5 || b.slice(0, 3) !== m.slice(0, 3)) return void 0;
+    if (b.length !== m.length || b.length < 5 || b.slice(0, 3) !== m.slice(0, 3)) return false;
     const diff = [];
     for (let i = 0; i < b.length; i++) if (b[i] !== m[i]) diff.push(i);
-    if (diff.length === 1) return "typo";
-    if (diff.length === 2 && diff[1] === diff[0] + 1 && b[diff[0]] === m[diff[1]] && b[diff[1]] === m[diff[0]]) return "typo";
+    if (diff.length === 1) return true;
+    return diff.length === 2 && diff[1] === diff[0] + 1 && b[diff[0]] === m[diff[1]] && b[diff[1]] === m[diff[0]];
+  }
+  function inexactMatch(bank, manual) {
+    if (!Number.isInteger(bank) || !Number.isInteger(manual) || bank <= 0 || manual <= 0 || bank === manual) return void 0;
+    if (isRoundedUp(bank, manual)) return "round-up";
+    if (bank % 1e3 === 0) return void 0;
+    if (isFirstDigits(bank, manual)) return "first-digits";
+    if (isTypo(bank, manual)) return "typo";
     return void 0;
   }
-  var KIND_RANK = { "round-up": 0, "first-digits": 1, typo: 2, "round-sum-up": 3 };
+  var KIND_RANK = { "round-up": 0, "first-digits": 1, typo: 2 };
   function sideAmount(c, e, own) {
     const isExpense = c.outcome > 0 && c.income === 0;
     const sameOut = e.outcomeAccount === c.outcomeAccount || isExpense && own.has(c.outcomeAccount) && own.has(e.outcomeAccount);
