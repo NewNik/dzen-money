@@ -1,0 +1,13 @@
+{
+  "source": "grab-email",
+  "kind": "food",
+  "service": "GrabFood",
+  "gmailMessageId": "test",
+  "orderId": "A-0TESTFOOD0001AV",
+  "occurredAtLocal": "2026-11-08T18:53:00+07:00",
+  "dateLocal": "2026-11-08",
+  "amount": 312000,
+  "currency": "VND",
+  "paymentMethod": "Cash",
+  "merchant": "TEST MEAL - Food & Drink"
+}

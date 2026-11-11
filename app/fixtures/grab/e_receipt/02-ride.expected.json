@@ -1,0 +1,12 @@
+{
+  "source": "grab-email",
+  "kind": "ride",
+  "service": "GrabBike",
+  "gmailMessageId": "test",
+  "orderId": "A-0TESTRIDE0001AV",
+  "occurredAtLocal": "2026-10-19T11:57:00+07:00",
+  "dateLocal": "2026-10-19",
+  "amount": 59000,
+  "currency": "VND",
+  "paymentMethod": "Cash"
+}
