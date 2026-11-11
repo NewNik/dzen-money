@@ -48,6 +48,10 @@ export function readMeta(resp: unknown): ZenMeta {
 
 export const readTransactions = (resp: unknown): ExistingTxn[] => (resp as RawDiff).transaction ?? [];
 
+/** Те же операции целиком — для повторной отправки с правкой (сверка с чеками). */
+export const readFullTransactions = (resp: unknown): ZenTransaction[] =>
+  ((resp as { transaction?: ZenTransaction[] }).transaction ?? []);
+
 /** Запрос на запись. Поля deletion нет и не будет: удалять из Дзен-мани скрипт не должен. */
 export function writeRequest(serverTimestamp: number, txns: ZenTransaction[], now: number): ZenDiffRequest {
   return { currentClientTimestamp: now, serverTimestamp, transaction: txns };

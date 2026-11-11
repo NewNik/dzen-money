@@ -20,9 +20,29 @@ export function txnLine(t: ParsedBankTxn, category?: string): string {
   return [`${fmtDay(t.dateLocal)} ${sign}${fmtAmount(t.amount)} ${t.currency}${fee}`, category ?? 'без категории', acc].join(' · ');
 }
 
+/** `чек Grab 10.11 · 245 000 VND · Доставка еды · <ресторан>`. Ресторан — название заведения, не имя человека. */
+export function receiptLine(e: { source: string; dateLocal: string; amount: number; currency: string; note?: string }, category?: string): string {
+  const src = e.source.charAt(0).toUpperCase() + e.source.slice(1);
+  return [`чек ${src} ${fmtDay(e.dateLocal)}`, `${fmtAmount(e.amount)} ${e.currency}`, category, e.note].filter(Boolean).join(' · ');
+}
+
 export const gmailLink = (msgId: string): string => `https://mail.google.com/mail/u/0/#all/${msgId}`;
 
-export type EventKind = 'written' | 'dryrun' | 'duplicate' | 'unparsed' | 'quarantine' | 'error';
+export type EventKind =
+  | 'written'
+  | 'dryrun'
+  | 'duplicate'
+  | 'unparsed'
+  | 'quarantine'
+  | 'error'
+  /** чек подтвердил операцию скрипта */
+  | 'receipt'
+  /** чек совпал с ручной операцией — подсказка */
+  | 'receiptHint'
+  /** операция для чека не появилась */
+  | 'receiptUnmatched'
+  /** несколько операций с той же суммой — не угадываем */
+  | 'receiptAmbiguous';
 
 export interface MsgEvent {
   kind: EventKind;
@@ -39,6 +59,10 @@ const ICON: Record<EventKind, string> = {
   unparsed: '❓',
   quarantine: '🚫',
   error: '❌',
+  receipt: '🧾',
+  receiptHint: '💡',
+  receiptUnmatched: '🕳',
+  receiptAmbiguous: '❓',
 };
 const TITLE: Record<EventKind, string> = {
   written: 'записано',
@@ -47,8 +71,12 @@ const TITLE: Record<EventKind, string> = {
   unparsed: 'не разобрано',
   quarantine: 'карантин',
   error: 'ошибка',
+  receipt: 'подтверждено чеком',
+  receiptHint: 'чек совпал с ручной операцией — не правлю',
+  receiptUnmatched: 'операция для чека не найдена',
+  receiptAmbiguous: 'несколько операций с такой суммой — не угадываю',
 };
-const PROBLEMS: ReadonlySet<EventKind> = new Set<EventKind>(['duplicate', 'unparsed', 'quarantine', 'error']);
+const PROBLEMS: ReadonlySet<EventKind> = new Set<EventKind>(['duplicate', 'unparsed', 'quarantine', 'error', 'receiptAmbiguous']);
 
 /**
  * Сообщение по итогам запуска или null, если писать не о чем.
@@ -82,6 +110,10 @@ export interface DayStats {
   unparsed: number;
   quarantine: number;
   error: number;
+  receipt: number;
+  receiptHint: number;
+  receiptUnmatched: number;
+  receiptAmbiguous: number;
   /** Сумма записанных расходов и доходов по валютам. */
   outcome: Record<string, number>;
   income: Record<string, number>;
@@ -94,6 +126,10 @@ export const emptyDay = (): DayStats => ({
   unparsed: 0,
   quarantine: 0,
   error: 0,
+  receipt: 0,
+  receiptHint: 0,
+  receiptUnmatched: 0,
+  receiptAmbiguous: 0,
   outcome: {},
   income: {},
 });
@@ -146,6 +182,7 @@ export function buildSummary(
   const got = sums(s.income);
   out.push(`Записано операций: ${s.written}${spent ? ` · расходы ${spent}` : ''}${got ? ` · доходы ${got}` : ''}`);
   if (s.dryrun) out.push(`dry-run (не записано): ${s.dryrun}`);
+  if (s.receipt) out.push(`Подтверждено чеками: ${s.receipt}`);
   const probs = (['duplicate', 'unparsed', 'quarantine', 'error'] as const).filter((k) => s[k]).map((k) => `${TITLE[k]}: ${s[k]}`);
   if (probs.length) out.push(`За день: ${probs.join('; ')}`);
   const wait = Object.entries(waiting).filter(([, n]) => n > 0);

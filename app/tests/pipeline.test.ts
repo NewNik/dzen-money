@@ -96,3 +96,31 @@ describe('anonymizeHtml', () => {
     expect(r).toEqual({ ok: false, error: 'не разобрана дата' });
   });
 });
+
+describe('processReceiptEmail (чек Grab)', async () => {
+  const { processReceiptEmail } = await import('../src/core/pipeline');
+  const { readFileSync } = await import('node:fs');
+  const { join } = await import('node:path');
+  const html = readFileSync(join(__dirname, '../fixtures/grab/e_receipt/01-food.html'), 'utf8');
+  const raw = (ar: string): string => `Authentication-Results: ${ar}\r\nSubject: x\r\n\r\nbody`;
+  const ok = 'mx.google.com; dkim=pass header.i=@grab.com; spf=pass smtp.mailfrom=bounce@amazonses.com; dmarc=pass header.from=grab.com';
+  const msg = { id: 'r1', from: 'Grab <no-reply@grab.com>', subject: 'Your Grab E-Receipt', html, raw: raw(ok) };
+
+  it('подлинный чек разбирается', () => {
+    const r = processReceiptEmail(msg);
+    expect(r.status === 'receipt' && r.receipt.amount).toBe(312000);
+  });
+  it('чужой отправитель → карантин', () => {
+    expect(processReceiptEmail({ ...msg, from: 'Grab <no-reply@grab.example>' }).status).toBe('quarantine');
+  });
+  it('DKIM другого домена → карантин', () => {
+    const bad = ok.replace('header.i=@grab.com', 'header.i=@evil.example');
+    expect(processReceiptEmail({ ...msg, raw: raw(bad) }).status).toBe('quarantine');
+  });
+  it('реклама с того же адреса → пропуск', () => {
+    expect(processReceiptEmail({ ...msg, subject: 'NGÀN MÓN FLASH SALE' })).toEqual({ status: 'skip', reason: 'не чек' });
+  });
+  it('чек с неизвестной вёрсткой → не разобрано', () => {
+    expect(processReceiptEmail({ ...msg, html: '<p>?</p>' }).status).toBe('unparsed');
+  });
+});

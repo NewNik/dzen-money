@@ -24,6 +24,7 @@ var ZenApp = (() => {
   __export(main_exports, {
     checkZen: () => checkZen,
     dailySummary: () => dailySummary,
+    dumpGrabSample: () => dumpGrabSample,
     dumpSample: () => dumpSample,
     install: () => install,
     run: () => run,
@@ -277,6 +278,105 @@ var ZenApp = (() => {
   }
   var isTrusted = (a) => a.dkim && a.dmarc;
 
+  // src/core/receipts/grab/e-receipt.ts
+  var MONTHS = ["jan", "feb", "mar", "apr", "may", "jun", "jul", "aug", "sep", "oct", "nov", "dec"];
+  var monthIndex = (name) => MONTHS.indexOf(name.slice(0, 3).toLowerCase());
+  var p2 = (n) => String(n).padStart(2, "0");
+  var validDate = (y, mo, d) => mo >= 1 && mo <= 12 && d >= 1 && d <= new Date(Date.UTC(y, mo, 0)).getUTCDate();
+  function parseGrabAmount(s) {
+    const t = s.trim();
+    if (!/^(?:\d{1,3}(?:[.,]\d{3})+|\d+)$/.test(t)) return null;
+    const n = Number(t.replace(/[.,]/g, ""));
+    return Number.isSafeInteger(n) && n > 0 ? n : null;
+  }
+  function foodDateTime(text) {
+    const m = /\b(\d{1,2}) ([A-Za-z]{3}) (\d{2}) (\d{1,2}):(\d{2}) ([+-])(\d{2})(\d{2})\b/.exec(text);
+    if (!m) return null;
+    const [d, y, hh, mi, oh, om] = [m[1], m[3], m[4], m[5], m[7], m[8]].map(Number);
+    const mo = monthIndex(m[2]) + 1;
+    const year = 2e3 + y;
+    if (!validDate(year, mo, d) || hh > 23 || mi > 59 || oh > 14 || om > 59) return null;
+    const offsetMin = (m[6] === "-" ? -1 : 1) * (oh * 60 + om);
+    const local = new Date(Date.UTC(year, mo - 1, d, hh, mi) + (7 * 60 - offsetMin) * 6e4);
+    const dateLocal = `${local.getUTCFullYear()}-${p2(local.getUTCMonth() + 1)}-${p2(local.getUTCDate())}`;
+    return { occurredAtLocal: `${dateLocal}T${p2(local.getUTCHours())}:${p2(local.getUTCMinutes())}:00+07:00`, dateLocal };
+  }
+  function rideDateTime(text) {
+    const m = /Picked up on (\d{1,2}) ([A-Za-z]+) (\d{4})/.exec(text);
+    if (!m) return null;
+    const [d, y] = [Number(m[1]), Number(m[3])];
+    const mo = monthIndex(m[2]) + 1;
+    if (!validDate(y, mo, d)) return null;
+    const dateLocal = `${y}-${p2(mo)}-${p2(d)}`;
+    const trip = text.indexOf("Your Trip");
+    const t = trip >= 0 ? /\b(\d{1,2}):(\d{2}) ?(AM|PM)\b/.exec(text.slice(trip)) : null;
+    if (!t) return { dateLocal };
+    const h12 = Number(t[1]);
+    const mi = Number(t[2]);
+    if (h12 < 1 || h12 > 12 || mi > 59) return { dateLocal };
+    const hh = h12 % 12 + (t[3] === "PM" ? 12 : 0);
+    return { occurredAtLocal: `${dateLocal}T${p2(hh)}:${p2(mi)}:00+07:00`, dateLocal };
+  }
+  var AMOUNT = "(\\d[\\d.,]*)\\s*₫";
+  function parseFood(text, ctx) {
+    const orderId = /Mã đơn hàng\s+(A-[A-Z0-9]+)\b/.exec(text)?.[1];
+    if (!orderId) return { ok: false, error: "не разобран номер заказа" };
+    const total = parseGrabAmount(new RegExp(`Tổng cộng\\s*${AMOUNT}`).exec(text)?.[1] ?? "");
+    if (total === null) return { ok: false, error: "не разобрана сумма" };
+    const paid = parseGrabAmount(new RegExp(`BẠN TRẢ\\s*${AMOUNT}`).exec(text)?.[1] ?? "");
+    if (paid === null) return { ok: false, error: "нет строки «BẠN TRẢ»" };
+    if (paid !== total) return { ok: false, error: "итог и «BẠN TRẢ» различаются" };
+    const dt = foodDateTime(text);
+    if (!dt) return { ok: false, error: "не разобрана дата" };
+    return {
+      ok: true,
+      receipt: {
+        source: "grab-email",
+        kind: "food",
+        service: "GrabFood",
+        gmailMessageId: ctx.gmailMessageId,
+        orderId,
+        ...dt,
+        amount: total,
+        currency: "VND",
+        paymentMethod: /Bạn trả bằng:?\s*(.+?)\s+Chi tiết/.exec(text)?.[1],
+        merchant: /Đặt từ\s+(.+?)\s+Giao đến/.exec(text)?.[1]
+      }
+    };
+  }
+  function parseRide(text, ctx) {
+    const orderId = /Booking ID:\s*(A-[A-Z0-9]+)\b/.exec(text)?.[1];
+    if (!orderId) return { ok: false, error: "не разобран номер поездки" };
+    const total = parseGrabAmount(new RegExp(`Total Paid\\s*${AMOUNT}`).exec(text)?.[1] ?? "");
+    if (total === null) return { ok: false, error: "не разобрана сумма" };
+    const dt = rideDateTime(text);
+    if (!dt) return { ok: false, error: "не разобрана дата" };
+    const head = text.slice(0, text.indexOf("Booking ID:"));
+    return {
+      ok: true,
+      receipt: {
+        source: "grab-email",
+        kind: "ride",
+        service: /\bGrab[A-Z][A-Za-z0-9]*/.exec(head)?.[0] ?? "Grab",
+        gmailMessageId: ctx.gmailMessageId,
+        orderId,
+        ...dt,
+        amount: total,
+        currency: "VND",
+        paymentMethod: /Paid by\s+(\D+?)\s+\d[\d.,]*/.exec(text)?.[1]
+      }
+    };
+  }
+  function parseGrabReceiptCells(cells, ctx) {
+    const text = cells.join(" ");
+    if (text.includes("Mã đơn hàng") && text.includes("Đặt từ")) return parseFood(text, ctx);
+    if (text.includes("Booking ID:") && text.includes("Picked up on")) return parseRide(text, ctx);
+    return { ok: false, error: "неизвестный вид чека Grab" };
+  }
+  function parseGrabReceipt(html, ctx) {
+    return parseGrabReceiptCells(htmlToCells(html), ctx);
+  }
+
   // src/core/pipeline.ts
   var VCB_SENDER = "vcbdigibank@info.vietcombank.com.vn";
   var VCB_ORG_DOMAIN = "vietcombank.com.vn";
@@ -287,6 +387,17 @@ var ZenApp = (() => {
     if (!isTrusted(auth)) return { status: "quarantine", reason: "не прошла проверка DKIM/DMARC", auth };
     const r = parseTransferReceipt(msg.html, { gmailMessageId: msg.id, auth, ownAccounts });
     return r.ok ? { status: "parsed", txn: r.txn } : { status: "unparsed", reason: r.error, auth };
+  }
+  var GRAB_SENDER = "no-reply@grab.com";
+  var GRAB_ORG_DOMAIN = "grab.com";
+  var GRAB_RECEIPT_SUBJECT = "Your Grab E-Receipt";
+  function processReceiptEmail(msg) {
+    const auth = parseAuthResults(topAuthResultsHeader(msg.raw), GRAB_ORG_DOMAIN);
+    if (address(msg.from) !== GRAB_SENDER) return { status: "quarantine", reason: "чужой отправитель", auth };
+    if (!isTrusted(auth)) return { status: "quarantine", reason: "не прошла проверка DKIM/DMARC", auth };
+    if (msg.subject.trim() !== GRAB_RECEIPT_SUBJECT) return { status: "skip", reason: "не чек" };
+    const r = parseGrabReceipt(msg.html, { gmailMessageId: msg.id });
+    return r.ok ? { status: "receipt", receipt: r.receipt } : { status: "unparsed", reason: r.error, auth };
   }
   var maskAccount = (a) => a ? "****" + a.slice(-4) : "-";
   var authStr = (a) => ["dkim", "spf", "dmarc"].map((k) => `${k}=${a[k] ? "pass" : "no"}`).join(" ");
@@ -356,6 +467,72 @@ var ZenApp = (() => {
     });
   }
 
+  // src/core/zen/evidence.ts
+  var nextDay = (iso) => new Date(Date.parse(iso) + 864e5).toISOString().slice(0, 10);
+  function grabEvidence(r) {
+    if (r.kind !== "food") return null;
+    const late = r.occurredAtLocal !== void 0 && Number(r.occurredAtLocal.slice(11, 13)) >= 23;
+    return {
+      source: "grab",
+      id: r.orderId,
+      msgId: r.gmailMessageId,
+      dateLocal: r.dateLocal,
+      dates: late ? [r.dateLocal, nextDay(r.dateLocal)] : [r.dateLocal],
+      amount: r.amount,
+      currency: r.currency,
+      tagTitle: "Доставка еды",
+      note: r.merchant,
+      personOnly: true
+    };
+  }
+  var evidenceMarker = (e) => `[${e.source}:${e.id}]`;
+  var isScriptOp = (t) => /\[vcb:[^\]]+\]/.test(t.comment ?? "") && !/\[vcb:[^\]]+:fee\]/.test(t.comment ?? "");
+  var hasEvidence = (t) => /\[(?!vcb:)[a-z]+:[^\]]+\]/.test(t.comment ?? "");
+  var untouched = (t) => t.changed - t.created <= 60;
+  var DAY = 864e5;
+  function reconcile(evidences, creates, existing, ctx) {
+    const outCreates = [...creates];
+    const alive = existing.filter((t) => !t.deleted);
+    const updates = [];
+    const used = /* @__PURE__ */ new Set();
+    const outcomes = evidences.map((ev) => {
+      const mark = evidenceMarker(ev);
+      if ([...outCreates, ...alive].some((t) => (t.comment ?? "").includes(mark))) return { status: "already", ev };
+      const tagId = ctx.tagsByTitle[tagKey(ev.tagTitle)];
+      if (tagId === void 0) return { status: "no-tag", ev };
+      const instrument = ctx.instruments[ev.currency];
+      const fits = (t) => !used.has(t.id) && t.outcome === ev.amount && t.income === 0 && t.outcomeAccount === t.incomeAccount && ctx.ownAccounts.has(t.outcomeAccount) && t.outcomeInstrument === instrument && ev.dates.includes(t.date);
+      const scriptFits = (t) => fits(t) && isScriptOp(t) && !hasEvidence(t) && (!ev.personOnly || looksLikePerson(t.originalPayee ?? t.payee ?? void 0));
+      const newIdx = outCreates.flatMap((t, i) => scriptFits(t) ? [i] : []);
+      const old = alive.filter(scriptFits);
+      if (newIdx.length + old.length > 1) return { status: "ambiguous", ev, count: newIdx.length + old.length };
+      if (newIdx.length + old.length === 1) {
+        const target = newIdx.length ? "create" : "existing";
+        const op = newIdx.length ? outCreates[newIdx[0]] : old[0];
+        const current = op.tag?.[0];
+        const mayRetag = current === void 0 || ctx.heuristicTagIds.has(current) || target === "existing" && untouched(op);
+        const txn = {
+          ...op,
+          tag: mayRetag ? [tagId] : op.tag,
+          comment: [op.comment, ev.note, mark].filter(Boolean).join(" "),
+          ...target === "existing" ? { changed: ctx.now } : {}
+        };
+        used.add(op.id);
+        if (target === "create") outCreates[newIdx[0]] = txn;
+        else updates.push(txn);
+        return { status: "applied", ev, target, txn, ...!mayRetag && current !== tagId ? { keptTag: current } : {} };
+      }
+      const manual = alive.find((t) => fits(t) && !(t.comment ?? "").includes("[vcb:"));
+      if (manual) {
+        used.add(manual.id);
+        return { status: "manual", ev, match: manual };
+      }
+      const age = Math.round((Date.parse(ctx.today) - Date.parse(ev.dateLocal)) / DAY);
+      return { status: age >= (ctx.waitDays ?? 3) ? "expired" : "waiting", ev };
+    });
+    return { outcomes, creates: outCreates, updates };
+  }
+
   // src/core/zen/diff.ts
   var ZEN_DIFF_URL = "https://api.zenmoney.ru/v8/diff/";
   var fullFetchRequest = (now) => ({ currentClientTimestamp: now, serverTimestamp: 0 });
@@ -376,6 +553,7 @@ var ZenApp = (() => {
     };
   }
   var readTransactions = (resp) => resp.transaction ?? [];
+  var readFullTransactions = (resp) => resp.transaction ?? [];
   function writeRequest(serverTimestamp, txns, now) {
     return { currentClientTimestamp: now, serverTimestamp, transaction: txns };
   }
@@ -448,8 +626,8 @@ var ZenApp = (() => {
 
   // src/core/zen/dedup.ts
   var markerName = (comment) => /\[(vcb:[^\]]+)\]/.exec(comment ?? "")?.[1];
-  var DAY = 864e5;
-  var dayDiff = (a, b) => Math.abs(Date.parse(a) - Date.parse(b)) / DAY;
+  var DAY2 = 864e5;
+  var dayDiff = (a, b) => Math.abs(Date.parse(a) - Date.parse(b)) / DAY2;
   var INEXACT_TEXT = {
     "round-up": "сумма округлена вверх",
     "first-digits": "совпадают первые цифры",
@@ -927,6 +1105,10 @@ var ZenApp = (() => {
     const fee = t.feeAmount > 0 ? ` (+ комиссия ${fmtAmount(t.feeAmount)})` : "";
     return [`${fmtDay(t.dateLocal)} ${sign}${fmtAmount(t.amount)} ${t.currency}${fee}`, category ?? "без категории", acc].join(" · ");
   }
+  function receiptLine(e, category) {
+    const src = e.source.charAt(0).toUpperCase() + e.source.slice(1);
+    return [`чек ${src} ${fmtDay(e.dateLocal)}`, `${fmtAmount(e.amount)} ${e.currency}`, category, e.note].filter(Boolean).join(" · ");
+  }
   var gmailLink = (msgId) => `https://mail.google.com/mail/u/0/#all/${msgId}`;
   var ICON = {
     written: "✅",
@@ -934,7 +1116,11 @@ var ZenApp = (() => {
     duplicate: "👯",
     unparsed: "❓",
     quarantine: "🚫",
-    error: "❌"
+    error: "❌",
+    receipt: "🧾",
+    receiptHint: "💡",
+    receiptUnmatched: "🕳",
+    receiptAmbiguous: "❓"
   };
   var TITLE = {
     written: "записано",
@@ -942,9 +1128,13 @@ var ZenApp = (() => {
     duplicate: "похоже на ручной ввод — не записано",
     unparsed: "не разобрано",
     quarantine: "карантин",
-    error: "ошибка"
+    error: "ошибка",
+    receipt: "подтверждено чеком",
+    receiptHint: "чек совпал с ручной операцией — не правлю",
+    receiptUnmatched: "операция для чека не найдена",
+    receiptAmbiguous: "несколько операций с такой суммой — не угадываю"
   };
-  var PROBLEMS = /* @__PURE__ */ new Set(["duplicate", "unparsed", "quarantine", "error"]);
+  var PROBLEMS = /* @__PURE__ */ new Set(["duplicate", "unparsed", "quarantine", "error", "receiptAmbiguous"]);
   function buildRunMessage(events, system, notifyAll) {
     const shown = events.filter((e) => notifyAll || PROBLEMS.has(e.kind));
     if (!shown.length && !system.length) return null;
@@ -968,6 +1158,10 @@ var ZenApp = (() => {
     unparsed: 0,
     quarantine: 0,
     error: 0,
+    receipt: 0,
+    receiptHint: 0,
+    receiptUnmatched: 0,
+    receiptAmbiguous: 0,
     outcome: {},
     income: {}
   });
@@ -996,6 +1190,7 @@ var ZenApp = (() => {
     const got = sums(s.income);
     out.push(`Записано операций: ${s.written}${spent ? ` · расходы ${spent}` : ""}${got ? ` · доходы ${got}` : ""}`);
     if (s.dryrun) out.push(`dry-run (не записано): ${s.dryrun}`);
+    if (s.receipt) out.push(`Подтверждено чеками: ${s.receipt}`);
     const probs = ["duplicate", "unparsed", "quarantine", "error"].filter((k) => s[k]).map((k) => `${TITLE[k]}: ${s[k]}`);
     if (probs.length) out.push(`За день: ${probs.join("; ")}`);
     const wait = Object.entries(waiting).filter(([, n]) => n > 0);
@@ -1033,6 +1228,27 @@ var ZenApp = (() => {
   };
   var RANK = ["done", "dryrun", "duplicate", "unparsed", "quarantine", "error"];
   var FINAL = /* @__PURE__ */ new Set(["done", "duplicate", "quarantine"]);
+  var R = {
+    pending: "zen/receipt",
+    done: "zen/receipt-done",
+    // операция уточнена, уже была уточнена, совпала ручная, либо письмо не требует сверки
+    dryrun: "zen/receipt-dryrun",
+    // совпадение найдено, но режим dry-run
+    unmatched: "zen/receipt-unmatched"
+    // операция не появилась за WAIT_DAYS дней или кандидатов несколько
+  };
+  var R_RANK = ["done", "dryrun", "unmatched", "unparsed", "quarantine", "error"];
+  var R_LABEL = {
+    done: R.done,
+    dryrun: R.dryrun,
+    unmatched: R.unmatched,
+    unparsed: L.unparsed,
+    quarantine: L.quarantine,
+    error: L.error
+  };
+  var R_FINAL = /* @__PURE__ */ new Set(["done", "unmatched", "quarantine"]);
+  var WAIT_DAYS = 3;
+  var KEEP_CHECKED = 100;
   var BATCH = 30;
   var KEEP_IDS = 300;
   var MAX_RETRIES = 5;
@@ -1112,7 +1328,7 @@ var ZenApp = (() => {
     if (code !== 200) throw new Error(`Дзен-мани: HTTP ${code} ${r.getContentText().slice(0, 200)}`);
     return JSON.parse(r.getContentText());
   }
-  function syncToZen(pending, accounts, token, write, tag, redo, sys) {
+  function syncToZen(pending, accounts, token, write, tag, redo, sys, receipts) {
     const now = Math.floor(Date.now() / 1e3);
     const full = zenDiff(token, fullFetchRequest(now));
     const meta = readMeta(full);
@@ -1125,22 +1341,90 @@ var ZenApp = (() => {
       readTransactions(full),
       redo
     );
+    const creatable = plans.filter((p) => p.status === "create");
+    const rec = reconcile(
+      receipts.map((r) => r.ev),
+      creatable.flatMap((p) => p.creates),
+      readFullTransactions(full),
+      {
+        ownAccounts: new Set(Object.values(accounts)),
+        instruments: meta.instruments,
+        tagsByTitle: meta.tagsByTitle,
+        heuristicTagIds: new Set(rules.filter((r) => r.rule.person && r.tagId).map((r) => r.tagId)),
+        now,
+        today: today(),
+        waitDays: WAIT_DAYS
+      }
+    );
+    let k = 0;
+    for (const p of creatable) p.creates = rec.creates.slice(k, k += p.creates.length);
+    const tagName = (ids) => ids?.length ? ids.map((id) => meta.tagTitles[id] ?? id).join(", ") : void 0;
+    const awaiting = /* @__PURE__ */ new Map();
+    rec.outcomes.forEach((o, i) => {
+      const r = receipts[i];
+      const ev = o.ev;
+      const ref = `чек ${ev.source}:${ev.id} msg=${r.id}`;
+      switch (o.status) {
+        case "applied": {
+          const kept = o.keptTag ? `категория оставлена: ${tagName([o.keptTag])}` : void 0;
+          console.log(`${tag} ${ref}: ${o.target === "create" ? "уточняет новую операцию" : "обновляет операцию"} id=${o.txn.id} tag=${tagName(o.txn.tag) ?? "-"}${kept ? ` (${kept})` : ""}`);
+          const reason = [write ? void 0 : "dry-run, не изменено", kept].filter(Boolean).join("; ") || void 0;
+          r.event = { kind: "receipt", msgId: r.id, line: receiptLine(ev, tagName(o.txn.tag)), reason };
+          r.result = write ? null : "dryrun";
+          if (write) awaiting.set(r, o.txn.id);
+          break;
+        }
+        case "already":
+          console.log(`${tag} ${ref}: метка уже стоит на операции`);
+          r.result = "done";
+          break;
+        case "manual":
+          console.log(`${tag} ${ref}: совпала ручная операция id=${o.match.id} (${tagName(o.match.tag) ?? "без категории"}) — не правлю`);
+          r.event = { kind: "receiptHint", msgId: r.id, line: receiptLine(ev), reason: `в учёте: ${tagName(o.match.tag) ?? "без категории"}` };
+          r.result = "done";
+          break;
+        case "ambiguous":
+          console.log(`${tag} ${ref}: ${o.count} операции с суммой ${fmtAmount(ev.amount)} — не угадываю`);
+          r.event = { kind: "receiptAmbiguous", msgId: r.id, line: receiptLine(ev) };
+          r.result = "unmatched";
+          break;
+        case "expired":
+          console.log(`${tag} ${ref}: операция не появилась за ${WAIT_DAYS} дн.`);
+          r.event = { kind: "receiptUnmatched", msgId: r.id, line: receiptLine(ev) };
+          r.result = "unmatched";
+          break;
+        case "no-tag":
+          sys.push({ key: "evidence-tag:" + ev.tagTitle, text: `Чеки: нет категории «${ev.tagTitle}» в Дзен-мани.` });
+          r.result = null;
+          break;
+        default:
+          console.log(`${tag} ${ref}: операции пока нет, жду`);
+          r.result = null;
+      }
+    });
     const byId = new Map(pending.map((m) => [m.id, m]));
     for (const p of plans) {
       for (const d of p.decisions) console.log(`${tag} msg=${p.msgId} ${formatDecision(d, meta.tagTitles)}`);
       if (p.reason) console.log(`${tag} msg=${p.msgId} ${p.status}: ${p.reason}`);
       const m = byId.get(p.msgId);
-      const main = p.decisions[0]?.txn;
-      const category = main?.tag?.length ? main.tag.map((id) => meta.tagTitles[id] ?? id).join(", ") : void 0;
+      const main = p.creates[0] ?? p.decisions[0]?.txn;
+      const category = tagName(main?.tag);
       m.line = txnLine(m.txn, category);
       m.reason = p.reason;
       m.result = p.status === "done" ? "done" : p.status === "duplicate" ? "duplicate" : p.status === "unmapped" ? "unparsed" : write ? null : "dryrun";
     }
-    const toCreate = plans.filter((p) => p.status === "create");
-    if (!write || !toCreate.length) return;
-    const txns = toCreate.flatMap((p) => p.creates);
+    const toCreate = creatable;
+    const txns = [...toCreate.flatMap((p) => p.creates), ...rec.updates];
+    if (!write || !txns.length) return;
     const resp = zenDiff(token, writeRequest(meta.serverTimestamp, txns, now));
     const missing = new Set(missingAfterWrite(resp, txns.map((t) => t.id)));
+    for (const [r, id] of awaiting) {
+      r.result = missing.has(id) ? null : "done";
+      if (missing.has(id)) {
+        r.event = void 0;
+        console.log(`${tag} чек msg=${r.id}: операция id=${id} не подтверждена сервером, повтор в следующем запуске`);
+      }
+    }
     for (const p of toCreate) {
       const lost = p.creates.filter((t) => missing.has(t.id));
       const m = byId.get(p.msgId);
@@ -1157,7 +1441,9 @@ var ZenApp = (() => {
       const props = PropertiesService.getScriptProperties();
       const inbox = label(L.inbox);
       const threads = inbox.getThreads(0, BATCH);
-      if (!threads.length) return;
+      const rInbox = label(R.pending);
+      const rThreads = rInbox.getThreads(0, BATCH);
+      if (!threads.length && !rThreads.length) return;
       const write = isWriteMode(props);
       const tag = write ? "[write]" : "[dry-run]";
       const accounts = accountsMap(props);
@@ -1193,10 +1479,41 @@ var ZenApp = (() => {
           broken.add(i);
         }
       });
+      const rSeen = (props.getProperty("RECEIPT_IDS") ?? "").split(",").filter(Boolean);
+      const rSeenSet = new Set(rSeen);
+      const rChecked = (props.getProperty("RECEIPT_CHECKED") ?? "").split(",").filter(Boolean);
+      const rCheckedSet = new Set(rChecked);
+      const rMsgs = [];
+      const rBroken = /* @__PURE__ */ new Set();
+      rThreads.forEach((thread, i) => {
+        try {
+          for (const m of thread.getMessages()) {
+            const id = m.getId();
+            if (rSeenSet.has(id)) continue;
+            const out = processReceiptEmail({ id, from: m.getFrom(), subject: m.getSubject(), html: m.getBody(), raw: m.getRawContent() });
+            if (out.status !== "receipt") {
+              console.log(`${tag} чек msg=${id}: ${out.status} — ${out.reason}`);
+              const result = out.status === "skip" ? "done" : out.status;
+              const event = out.status === "skip" ? void 0 : { kind: out.status, msgId: id, line: "чек Grab", reason: out.reason };
+              rMsgs.push({ thread: i, id, result, reason: out.reason, event });
+              continue;
+            }
+            const ev = grabEvidence(out.receipt);
+            console.log(`${tag} чек msg=${id}: ${out.receipt.service} ${out.receipt.orderId} ${out.receipt.dateLocal} ${out.receipt.amount} ${out.receipt.currency}${ev ? "" : " — не сверяется"}`);
+            rMsgs.push(ev ? { thread: i, id, result: null, ev } : { thread: i, id, result: "done" });
+          }
+        } catch (e) {
+          console.error(`ошибка в треде чеков ${thread.getId()}: ${e instanceof Error ? e.stack : String(e)}`);
+          rBroken.add(i);
+        }
+      });
+      const waiting = rMsgs.filter((r) => r.ev);
+      const expired = (ev) => (Date.parse(today()) - Date.parse(ev.dateLocal)) / 864e5 >= WAIT_DAYS;
+      const receiptsNeedZen = waiting.some((r) => !rCheckedSet.has(r.id) || expired(r.ev));
       const sys = [];
       const pending = msgs.filter((m) => m.txn);
       const retryThreads = /* @__PURE__ */ new Set();
-      if (pending.length) {
+      if (pending.length || receiptsNeedZen) {
         const token = props.getProperty("ZEN_TOKEN");
         if (!token) {
           console.error(`${tag} не задано свойство ZEN_TOKEN — проверить дубли и записать нельзя`);
@@ -1204,11 +1521,16 @@ var ZenApp = (() => {
           pending.forEach((m) => m.result = "error");
         } else {
           try {
-            syncToZen(pending, accounts, token, write, tag, redo, sys);
+            syncToZen(pending, accounts, token, write, tag, redo, sys, waiting);
             pending.forEach((m) => delete retries[m.id]);
+            for (const r of waiting) if (!rCheckedSet.has(r.id)) rChecked.push(r.id);
           } catch (e) {
             const text2 = e instanceof Error ? e.message : String(e);
             console.error(`${tag} сбой Дзен-мани: ${text2}`);
+            for (const r of waiting) {
+              r.result = null;
+              r.event = void 0;
+            }
             if (text2.includes("401")) sys.push({ key: "zen-401", text: "Дзен-мани отвечает 401: токен ZEN_TOKEN недействителен, нужен новый." });
             for (const m of pending) {
               const n = (retries[m.id] ?? 0) + 1;
@@ -1239,6 +1561,17 @@ var ZenApp = (() => {
           seenSet.add(m.id);
         }
       }
+      rThreads.forEach((thread, i) => {
+        const mine = rMsgs.filter((r) => r.thread === i);
+        if (mine.some((r) => r.result === null) && !rBroken.has(i)) return;
+        let worst = rBroken.has(i) ? R_RANK.indexOf("error") : -1;
+        for (const r of mine) if (r.result) worst = Math.max(worst, R_RANK.indexOf(r.result));
+        if (worst >= 0) thread.addLabel(label(R_LABEL[R_RANK[worst]]));
+        thread.removeLabel(rInbox);
+      });
+      for (const r of rMsgs) if (r.result && R_FINAL.has(r.result) && !rSeenSet.has(r.id)) rSeen.push(r.id);
+      props.setProperty("RECEIPT_IDS", rSeen.slice(-KEEP_IDS).join(","));
+      props.setProperty("RECEIPT_CHECKED", rChecked.slice(-KEEP_CHECKED).join(","));
       props.setProperty("PROCESSED_IDS", seen.slice(-KEEP_IDS).join(","));
       props.setProperty("RETRIES", JSON.stringify(retries));
       const doneRedo = msgs.filter((m) => m.result === "done" && m.txn && redo.has(m.txn.orderNumber)).map((m) => m.txn.orderNumber);
@@ -1256,6 +1589,10 @@ var ZenApp = (() => {
       }
       threads.forEach((thread, i) => {
         if (broken.has(i)) events.push({ kind: "error", msgId: thread.getId(), reason: "исключение при разборе — см. журнал" });
+      });
+      for (const r of rMsgs) if (r.event) events.push(r.event);
+      rThreads.forEach((thread, i) => {
+        if (rBroken.has(i)) events.push({ kind: "error", msgId: thread.getId(), reason: "исключение при разборе чека — см. журнал" });
       });
       const day = today();
       const txns = new Map(msgs.filter((m) => m.txn).map((m) => [m.id, m.txn]));
@@ -1290,6 +1627,7 @@ var ZenApp = (() => {
   }
   function install() {
     Object.keys(L).forEach((k) => label(L[k]));
+    Object.keys(R).forEach((k) => label(R[k]));
     uninstall();
     ScriptApp.newTrigger("run").timeBased().everyMinutes(5).create();
     ScriptApp.newTrigger("dailySummary").timeBased().atHour(21).everyDays(1).inTimezone(TZ).create();
@@ -1344,6 +1682,66 @@ var ZenApp = (() => {
     GmailApp.createDraft(me, "zen sample: " + m.getSubject(), anonymizeHtml(m.getBody()));
     console.log("Обезличенный образец сохранён в «Черновики».");
   }
+  var GRAB_KEEP = [
+    "Tổng cộng",
+    "Ngày | Giờ",
+    "CHI TIẾT ĐƠN HÀNG",
+    "Người dùng",
+    "Mã đơn hàng",
+    "Đặt từ",
+    "Giao đến",
+    "Hồ sơ",
+    "HÓA ĐƠN CỦA BẠN",
+    "Bạn trả bằng:",
+    "Chi tiết",
+    "Số lượng:",
+    "Tổng tạm tính",
+    "Cước phí giao hàng",
+    "Phí dịch vụ",
+    "Tiền gửi xe",
+    "BẠN TRẢ",
+    "Booking ID:",
+    "Picked up on",
+    "Total Paid",
+    "Paid by",
+    "Breakdown",
+    "Fare",
+    "Promo",
+    "Passenger",
+    "Profile",
+    "Your Trip",
+    "Cash",
+    "₫"
+  ];
+  function maskGrabHtml(html) {
+    let skip = false;
+    return html.split(/(<[^>]*>)/).map((part) => {
+      if (part.startsWith("<")) {
+        if (/^<(style|script)\b/i.test(part)) skip = true;
+        if (/^<\/(style|script)/i.test(part)) skip = false;
+        return part.replace(/\b(href|src|alt|title)\s*=\s*("[^"]*"|'[^']*')/gi, '$1="#"');
+      }
+      if (skip) return part;
+      const text = normalizeText(decodeEntities(part));
+      if (!text) return part;
+      const keep = new RegExp("(" + GRAB_KEEP.map((k) => k.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")).join("|") + ")");
+      return text.split(keep).map((chunk, i) => i % 2 ? chunk : chunk.replace(/\p{L}/gu, "x").replace(/\d/g, "0")).join("");
+    }).join("");
+  }
+  function dumpGrabSample() {
+    const thread = GmailApp.search(`from:${GRAB_SENDER} subject:"${GRAB_RECEIPT_SUBJECT}"`, 0, 1)[0];
+    if (!thread) {
+      console.log("Чеков Grab не найдено.");
+      return;
+    }
+    const msgs = thread.getMessages();
+    const m = msgs[msgs.length - 1];
+    console.log(`Authentication-Results: ${topAuthResultsHeader(m.getRawContent()) ?? "нет заголовка"}`);
+    const out = processReceiptEmail({ id: m.getId(), from: m.getFrom(), subject: m.getSubject(), html: m.getBody(), raw: m.getRawContent() });
+    console.log(`Разбор: ${out.status}${out.status === "receipt" ? ` ${out.receipt.kind} ${out.receipt.dateLocal} ${out.receipt.amount}` : ` — ${out.reason}`}`);
+    GmailApp.createDraft(Session.getEffectiveUser().getEmail(), "zen sample: Grab", maskGrabHtml(m.getBody()));
+    console.log("Обезличенный образец сохранён в «Черновики».");
+  }
   return __toCommonJS(main_exports);
 })();
 
@@ -1354,3 +1752,4 @@ function dailySummary() { return ZenApp.dailySummary(); }
 function install() { return ZenApp.install(); }
 function uninstall() { return ZenApp.uninstall(); }
 function dumpSample() { return ZenApp.dumpSample(); }
+function dumpGrabSample() { return ZenApp.dumpGrabSample(); }

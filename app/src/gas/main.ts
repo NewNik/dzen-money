@@ -1,11 +1,23 @@
 // Тонкий слой Apps Script: Gmail, метки, таймер, HTTP. Вся логика — в core.
 // Режим задаёт свойство скрипта MODE: по умолчанию dry-run (ничего не пишет), `write` — запись в Дзен-мани.
 import { anonymizeHtml } from '../core/banks/vcb/anonymize';
-import { formatLog, maskAccount, processEmail, VCB_SENDER } from '../core/pipeline';
+import { topAuthResultsHeader } from '../core/auth';
+import { decodeEntities, normalizeText } from '../core/html';
+import {
+  formatLog,
+  GRAB_RECEIPT_SUBJECT,
+  GRAB_SENDER,
+  maskAccount,
+  processEmail,
+  processReceiptEmail,
+  VCB_SENDER,
+} from '../core/pipeline';
 import type { ParsedBankTxn, ZenDiffRequest } from '../core/types';
+import { grabEvidence, reconcile, type Evidence } from '../core/zen/evidence';
 import {
   fullFetchRequest,
   missingAfterWrite,
+  readFullTransactions,
   readMeta,
   readTransactions,
   writeRequest,
@@ -18,6 +30,8 @@ import {
   addStats,
   buildRunMessage,
   buildSummary,
+  fmtAmount,
+  receiptLine,
   throttle,
   truncate,
   txnLine,
@@ -39,6 +53,27 @@ type Result = Exclude<keyof typeof L, 'inbox'>;
 const RANK: Result[] = ['done', 'dryrun', 'duplicate', 'unparsed', 'quarantine', 'error'];
 /** Итоги, после которых письмо больше не трогаем. Остальные можно разобрать повторно, вернув zen/inbox. */
 const FINAL: ReadonlySet<Result> = new Set<Result>(['done', 'duplicate', 'quarantine']);
+
+// Чеки (подтверждения): ждут свою операцию под ярлыком zen/receipt.
+const R = {
+  pending: 'zen/receipt',
+  done: 'zen/receipt-done', // операция уточнена, уже была уточнена, совпала ручная, либо письмо не требует сверки
+  dryrun: 'zen/receipt-dryrun', // совпадение найдено, но режим dry-run
+  unmatched: 'zen/receipt-unmatched', // операция не появилась за WAIT_DAYS дней или кандидатов несколько
+} as const;
+type RResult = 'done' | 'dryrun' | 'unmatched' | 'unparsed' | 'quarantine' | 'error';
+const R_RANK: RResult[] = ['done', 'dryrun', 'unmatched', 'unparsed', 'quarantine', 'error'];
+const R_LABEL: Record<RResult, string> = {
+  done: R.done,
+  dryrun: R.dryrun,
+  unmatched: R.unmatched,
+  unparsed: L.unparsed,
+  quarantine: L.quarantine,
+  error: L.error,
+};
+const R_FINAL: ReadonlySet<RResult> = new Set<RResult>(['done', 'unmatched', 'quarantine']);
+const WAIT_DAYS = 3; // сколько дней чек ждёт операцию
+const KEEP_CHECKED = 100;
 
 const BATCH = 30; // тредов за запуск
 const KEEP_IDS = 300; // сколько id обработанных писем помнить
@@ -154,6 +189,17 @@ interface Msg {
   created?: boolean;
 }
 
+interface RMsg {
+  thread: number;
+  id: string;
+  /** null — чек ещё ждёт операцию. */
+  result: RResult | null;
+  ev?: Evidence;
+  reason?: string;
+  /** Событие для Telegram, если есть о чём сообщить. */
+  event?: MsgEvent;
+}
+
 /** Системная проблема для Telegram: ключ для антиспама и текст. */
 type SysProblem = { key: string; text: string };
 
@@ -166,6 +212,7 @@ function syncToZen(
   tag: string,
   redo: ReadonlySet<string>,
   sys: SysProblem[],
+  receipts: RMsg[],
 ): void {
   const now = Math.floor(Date.now() / 1000);
   // Полная выгрузка (~2,5 МБ) только когда есть что записать: нужна для проверки дублей по всем операциям.
@@ -181,13 +228,78 @@ function syncToZen(
     redo,
   );
 
+  // Сверка с чеками: уточняет операции этого запуска и находит уже записанные.
+  const creatable = plans.filter((p) => p.status === 'create');
+  const rec = reconcile(
+    receipts.map((r) => r.ev!),
+    creatable.flatMap((p) => p.creates),
+    readFullTransactions(full),
+    {
+      ownAccounts: new Set(Object.values(accounts)),
+      instruments: meta.instruments,
+      tagsByTitle: meta.tagsByTitle,
+      heuristicTagIds: new Set(rules.filter((r) => r.rule.person && r.tagId).map((r) => r.tagId!)),
+      now,
+      today: today(),
+      waitDays: WAIT_DAYS,
+    },
+  );
+  let k = 0;
+  for (const p of creatable) p.creates = rec.creates.slice(k, (k += p.creates.length));
+  const tagName = (ids: string[] | null | undefined): string | undefined =>
+    ids?.length ? ids.map((id) => meta.tagTitles[id] ?? id).join(', ') : undefined;
+  /** Чек → id операции, от записи которой зависит его итог (в режиме write). */
+  const awaiting = new Map<RMsg, string>();
+  rec.outcomes.forEach((o, i) => {
+    const r = receipts[i]!;
+    const ev = o.ev;
+    const ref = `чек ${ev.source}:${ev.id} msg=${r.id}`;
+    switch (o.status) {
+      case 'applied': {
+        const kept = o.keptTag ? `категория оставлена: ${tagName([o.keptTag])}` : undefined;
+        console.log(`${tag} ${ref}: ${o.target === 'create' ? 'уточняет новую операцию' : 'обновляет операцию'} id=${o.txn.id} tag=${tagName(o.txn.tag) ?? '-'}${kept ? ` (${kept})` : ''}`);
+        const reason = [write ? undefined : 'dry-run, не изменено', kept].filter(Boolean).join('; ') || undefined;
+        r.event = { kind: 'receipt', msgId: r.id, line: receiptLine(ev, tagName(o.txn.tag)), reason };
+        r.result = write ? null : 'dryrun';
+        if (write) awaiting.set(r, o.txn.id);
+        break;
+      }
+      case 'already':
+        console.log(`${tag} ${ref}: метка уже стоит на операции`);
+        r.result = 'done';
+        break;
+      case 'manual':
+        console.log(`${tag} ${ref}: совпала ручная операция id=${o.match.id} (${tagName(o.match.tag) ?? 'без категории'}) — не правлю`);
+        r.event = { kind: 'receiptHint', msgId: r.id, line: receiptLine(ev), reason: `в учёте: ${tagName(o.match.tag) ?? 'без категории'}` };
+        r.result = 'done';
+        break;
+      case 'ambiguous':
+        console.log(`${tag} ${ref}: ${o.count} операции с суммой ${fmtAmount(ev.amount)} — не угадываю`);
+        r.event = { kind: 'receiptAmbiguous', msgId: r.id, line: receiptLine(ev) };
+        r.result = 'unmatched';
+        break;
+      case 'expired':
+        console.log(`${tag} ${ref}: операция не появилась за ${WAIT_DAYS} дн.`);
+        r.event = { kind: 'receiptUnmatched', msgId: r.id, line: receiptLine(ev) };
+        r.result = 'unmatched';
+        break;
+      case 'no-tag':
+        sys.push({ key: 'evidence-tag:' + ev.tagTitle, text: `Чеки: нет категории «${ev.tagTitle}» в Дзен-мани.` });
+        r.result = null;
+        break;
+      default:
+        console.log(`${tag} ${ref}: операции пока нет, жду`);
+        r.result = null;
+    }
+  });
+
   const byId = new Map(pending.map((m) => [m.id, m]));
   for (const p of plans) {
     for (const d of p.decisions) console.log(`${tag} msg=${p.msgId} ${formatDecision(d, meta.tagTitles)}`);
     if (p.reason) console.log(`${tag} msg=${p.msgId} ${p.status}: ${p.reason}`);
     const m = byId.get(p.msgId)!;
-    const main = p.decisions[0]?.txn;
-    const category = main?.tag?.length ? main.tag.map((id) => meta.tagTitles[id] ?? id).join(', ') : undefined;
+    const main = p.creates[0] ?? p.decisions[0]?.txn; // creates — после сверки с чеками
+    const category = tagName(main?.tag);
     m.line = txnLine(m.txn!, category);
     m.reason = p.reason;
     m.result =
@@ -198,11 +310,19 @@ function syncToZen(
       : 'dryrun';
   }
 
-  const toCreate = plans.filter((p) => p.status === 'create');
-  if (!write || !toCreate.length) return;
-  const txns = toCreate.flatMap((p) => p.creates);
+  const toCreate = creatable;
+  const txns = [...toCreate.flatMap((p) => p.creates), ...rec.updates];
+  if (!write || !txns.length) return;
   const resp = zenDiff(token, writeRequest(meta.serverTimestamp, txns, now));
   const missing = new Set(missingAfterWrite(resp, txns.map((t) => t.id)));
+  for (const [r, id] of awaiting) {
+    // Операция не подтверждена сервером — чек остаётся ждать следующего запуска.
+    r.result = missing.has(id) ? null : 'done';
+    if (missing.has(id)) {
+      r.event = undefined;
+      console.log(`${tag} чек msg=${r.id}: операция id=${id} не подтверждена сервером, повтор в следующем запуске`);
+    }
+  }
   for (const p of toCreate) {
     const lost = p.creates.filter((t) => missing.has(t.id));
     const m = byId.get(p.msgId)!;
@@ -221,7 +341,9 @@ export function run(): void {
     const props = PropertiesService.getScriptProperties();
     const inbox = label(L.inbox);
     const threads = inbox.getThreads(0, BATCH);
-    if (!threads.length) return;
+    const rInbox = label(R.pending);
+    const rThreads = rInbox.getThreads(0, BATCH);
+    if (!threads.length && !rThreads.length) return;
 
     const write = isWriteMode(props);
     const tag = write ? '[write]' : '[dry-run]';
@@ -266,10 +388,45 @@ export function run(): void {
       }
     });
 
+    // --- чеки под ярлыком zen/receipt ---
+    const rSeen = (props.getProperty('RECEIPT_IDS') ?? '').split(',').filter(Boolean);
+    const rSeenSet = new Set(rSeen);
+    const rChecked = (props.getProperty('RECEIPT_CHECKED') ?? '').split(',').filter(Boolean);
+    const rCheckedSet = new Set(rChecked);
+    const rMsgs: RMsg[] = [];
+    const rBroken = new Set<number>();
+    rThreads.forEach((thread, i) => {
+      try {
+        for (const m of thread.getMessages()) {
+          const id = m.getId();
+          if (rSeenSet.has(id)) continue;
+          const out = processReceiptEmail({ id, from: m.getFrom(), subject: m.getSubject(), html: m.getBody(), raw: m.getRawContent() });
+          if (out.status !== 'receipt') {
+            console.log(`${tag} чек msg=${id}: ${out.status} — ${out.reason}`);
+            const result: RResult = out.status === 'skip' ? 'done' : out.status;
+            const event: MsgEvent | undefined = out.status === 'skip' ? undefined : { kind: out.status, msgId: id, line: 'чек Grab', reason: out.reason };
+            rMsgs.push({ thread: i, id, result, reason: out.reason, event });
+            continue;
+          }
+          const ev = grabEvidence(out.receipt);
+          console.log(`${tag} чек msg=${id}: ${out.receipt.service} ${out.receipt.orderId} ${out.receipt.dateLocal} ${out.receipt.amount} ${out.receipt.currency}${ev ? '' : ' — не сверяется'}`);
+          rMsgs.push(ev ? { thread: i, id, result: null, ev } : { thread: i, id, result: 'done' });
+        }
+      } catch (e) {
+        console.error(`ошибка в треде чеков ${thread.getId()}: ${e instanceof Error ? e.stack : String(e)}`);
+        rBroken.add(i);
+      }
+    });
+    const waiting = rMsgs.filter((r) => r.ev);
+    // Выгрузка из Дзен-мани ради чеков — только для нового чека и для чека с истёкшим сроком;
+    // в остальное время чек сверяется попутно, когда приходит письмо банка.
+    const expired = (ev: Evidence): boolean => (Date.parse(today()) - Date.parse(ev.dateLocal)) / 86_400_000 >= WAIT_DAYS;
+    const receiptsNeedZen = waiting.some((r) => !rCheckedSet.has(r.id) || expired(r.ev!));
+
     const sys: SysProblem[] = [];
     const pending = msgs.filter((m) => m.txn);
     const retryThreads = new Set<number>(); // оставить в zen/inbox до следующего запуска
-    if (pending.length) {
+    if (pending.length || receiptsNeedZen) {
       const token = props.getProperty('ZEN_TOKEN');
       if (!token) {
         console.error(`${tag} не задано свойство ZEN_TOKEN — проверить дубли и записать нельзя`);
@@ -277,11 +434,16 @@ export function run(): void {
         pending.forEach((m) => (m.result = 'error'));
       } else {
         try {
-          syncToZen(pending, accounts, token, write, tag, redo, sys);
+          syncToZen(pending, accounts, token, write, tag, redo, sys, waiting);
           pending.forEach((m) => delete retries[m.id]);
+          for (const r of waiting) if (!rCheckedSet.has(r.id)) rChecked.push(r.id);
         } catch (e) {
           const text = e instanceof Error ? e.message : String(e);
           console.error(`${tag} сбой Дзен-мани: ${text}`);
+          for (const r of waiting) {
+            r.result = null; // чеки подождут следующего запуска
+            r.event = undefined;
+          }
           if (text.includes('401')) sys.push({ key: 'zen-401', text: 'Дзен-мани отвечает 401: токен ZEN_TOKEN недействителен, нужен новый.' });
           for (const m of pending) {
             const n = (retries[m.id] ?? 0) + 1;
@@ -314,6 +476,18 @@ export function run(): void {
         seenSet.add(m.id);
       }
     }
+    rThreads.forEach((thread, i) => {
+      const mine = rMsgs.filter((r) => r.thread === i);
+      if (mine.some((r) => r.result === null) && !rBroken.has(i)) return; // есть чек, который ещё ждёт
+      let worst = rBroken.has(i) ? R_RANK.indexOf('error') : -1;
+      for (const r of mine) if (r.result) worst = Math.max(worst, R_RANK.indexOf(r.result));
+      if (worst >= 0) thread.addLabel(label(R_LABEL[R_RANK[worst]!]));
+      thread.removeLabel(rInbox);
+    });
+    for (const r of rMsgs) if (r.result && R_FINAL.has(r.result) && !rSeenSet.has(r.id)) rSeen.push(r.id);
+    props.setProperty('RECEIPT_IDS', rSeen.slice(-KEEP_IDS).join(','));
+    props.setProperty('RECEIPT_CHECKED', rChecked.slice(-KEEP_CHECKED).join(','));
+
     props.setProperty('PROCESSED_IDS', seen.slice(-KEEP_IDS).join(','));
     props.setProperty('RETRIES', JSON.stringify(retries));
     // Выполненные REDO убираем, чтобы при следующих запусках не разбирать память заново.
@@ -334,6 +508,10 @@ export function run(): void {
     }
     threads.forEach((thread, i) => {
       if (broken.has(i)) events.push({ kind: 'error', msgId: thread.getId(), reason: 'исключение при разборе — см. журнал' });
+    });
+    for (const r of rMsgs) if (r.event) events.push(r.event);
+    rThreads.forEach((thread, i) => {
+      if (rBroken.has(i)) events.push({ kind: 'error', msgId: thread.getId(), reason: 'исключение при разборе чека — см. журнал' });
     });
     const day = today();
     const txns = new Map(msgs.filter((m) => m.txn).map((m) => [m.id, m.txn!]));
@@ -373,6 +551,7 @@ export function checkZen(): void {
 /** Запустить один раз вручную: создаёт метки и таймер на каждые 5 минут. */
 export function install(): void {
   (Object.keys(L) as (keyof typeof L)[]).forEach((k) => label(L[k]));
+  (Object.keys(R) as (keyof typeof R)[]).forEach((k) => label(R[k]));
   uninstall();
   ScriptApp.newTrigger('run').timeBased().everyMinutes(5).create();
   ScriptApp.newTrigger('dailySummary').timeBased().atHour(21).everyDays(1).inTimezone(TZ).create();
@@ -439,5 +618,55 @@ export function dumpSample(): void {
   const m = msgs[msgs.length - 1]!;
   const me = Session.getEffectiveUser().getEmail();
   GmailApp.createDraft(me, 'zen sample: ' + m.getSubject(), anonymizeHtml(m.getBody()));
+  console.log('Обезличенный образец сохранён в «Черновики».');
+}
+
+// Подписи чека Grab, которые остаются в обезличенном образце; весь остальной текст затирается.
+const GRAB_KEEP = [
+  'Tổng cộng', 'Ngày | Giờ', 'CHI TIẾT ĐƠN HÀNG', 'Người dùng', 'Mã đơn hàng', 'Đặt từ', 'Giao đến', 'Hồ sơ',
+  'HÓA ĐƠN CỦA BẠN', 'Bạn trả bằng:', 'Chi tiết', 'Số lượng:', 'Tổng tạm tính', 'Cước phí giao hàng', 'Phí dịch vụ',
+  'Tiền gửi xe', 'BẠN TRẢ', 'Booking ID:', 'Picked up on', 'Total Paid', 'Paid by', 'Breakdown', 'Fare', 'Promo',
+  'Passenger', 'Profile', 'Your Trip', 'Cash', '₫',
+];
+
+/** Текст вне тегов: подписи из GRAB_KEEP остаются, остальные буквы → x, цифры → 0. */
+function maskGrabHtml(html: string): string {
+  let skip = false;
+  return html
+    .split(/(<[^>]*>)/)
+    .map((part) => {
+      if (part.startsWith('<')) {
+        if (/^<(style|script)\b/i.test(part)) skip = true;
+        if (/^<\/(style|script)/i.test(part)) skip = false;
+        return part.replace(/\b(href|src|alt|title)\s*=\s*("[^"]*"|'[^']*')/gi, '$1="#"');
+      }
+      if (skip) return part;
+      const text = normalizeText(decodeEntities(part));
+      if (!text) return part;
+      const keep = new RegExp('(' + GRAB_KEEP.map((k) => k.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')).join('|') + ')');
+      return text
+        .split(keep)
+        .map((chunk, i) => (i % 2 ? chunk : chunk.replace(/\p{L}/gu, 'x').replace(/\d/g, '0')))
+        .join('');
+    })
+    .join('');
+}
+
+/**
+ * Кладёт в «Черновики» обезличенный HTML последнего чека Grab и пишет в журнал заголовок Authentication-Results.
+ * Перед тем как куда-либо отправлять, просмотреть: не осталось ли имён и адресов.
+ */
+export function dumpGrabSample(): void {
+  const thread = GmailApp.search(`from:${GRAB_SENDER} subject:"${GRAB_RECEIPT_SUBJECT}"`, 0, 1)[0];
+  if (!thread) {
+    console.log('Чеков Grab не найдено.');
+    return;
+  }
+  const msgs = thread.getMessages();
+  const m = msgs[msgs.length - 1]!;
+  console.log(`Authentication-Results: ${topAuthResultsHeader(m.getRawContent()) ?? 'нет заголовка'}`);
+  const out = processReceiptEmail({ id: m.getId(), from: m.getFrom(), subject: m.getSubject(), html: m.getBody(), raw: m.getRawContent() });
+  console.log(`Разбор: ${out.status}${out.status === 'receipt' ? ` ${out.receipt.kind} ${out.receipt.dateLocal} ${out.receipt.amount}` : ` — ${out.reason}`}`);
+  GmailApp.createDraft(Session.getEffectiveUser().getEmail(), 'zen sample: Grab', maskGrabHtml(m.getBody()));
   console.log('Обезличенный образец сохранён в «Черновики».');
 }

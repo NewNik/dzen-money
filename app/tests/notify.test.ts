@@ -124,3 +124,19 @@ describe('антиспам', () => {
     expect(r.send).toBe(true);
   });
 });
+
+describe('чеки', async () => {
+  const { buildRunMessage, receiptLine } = await import('../src/core/notify');
+  const ev = { source: 'grab', dateLocal: '2026-11-10', amount: 245000, currency: 'VND', note: 'TEST KITCHEN' };
+  it('строка чека', () => {
+    expect(receiptLine(ev, 'Доставка еды')).toBe('чек Grab 10.11 · 245 000 VND · Доставка еды · TEST KITCHEN');
+  });
+  it('подтверждение — не проблема, неоднозначность — проблема со ссылкой', () => {
+    const okMsg = buildRunMessage([{ kind: 'receipt', msgId: 'm', line: receiptLine(ev, 'Доставка еды') }], [], true)!;
+    expect(okMsg.startsWith('Дзен-мани')).toBe(true);
+    expect(buildRunMessage([{ kind: 'receipt', msgId: 'm', line: 'x' }], [], false)).toBeNull();
+    const bad = buildRunMessage([{ kind: 'receiptAmbiguous', msgId: 'm', line: receiptLine(ev) }], [], false)!;
+    expect(bad).toContain('нужно внимание');
+    expect(bad).toContain('#all/m');
+  });
+});
