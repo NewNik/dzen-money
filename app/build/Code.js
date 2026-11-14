@@ -923,7 +923,7 @@ var ZenApp = (() => {
     {
       match: "/(?<![a-z0-9])(?:bach hoa xanh|bhx)/",
       field: "payee",
-      tag: null,
+      tag: "Продукты",
       payee: "Bach Hoa Xanh"
     },
     {

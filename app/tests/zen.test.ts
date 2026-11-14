@@ -374,11 +374,17 @@ describe('правила категорий', () => {
       expect(tagOf({ beneficiaryName: 'NHA THUOC TEST_NGUYEN THI TEST' })).toBe('Здоровье');
       expect(tagOf({ beneficiaryName: 'HO KINH DOANH TEST PET SHOP' })).toBe('Кошки');
     });
-    it('магазин со смешанными покупками и платёжный шлюз — правило без категории', () => {
-      expect(findRule(parsed({ beneficiaryName: 'CTCP TM BACH HOA XANH' }), rules)).toMatchObject({ tagId: null });
+    it('платёжный шлюз — правило без категории', () => {
       expect(findRule(parsed({ beneficiaryName: 'BAOKIM CONG THANH TOAN', amount: 245000 }), rules)).toMatchObject({ tagId: null });
+    });
+    it('Bach Hoa Xanh — «Продукты» по умолчанию, получатель приводится к одному имени', () => {
+      // Подмена получателя лишает Дзен-мани подсказки по имени, поэтому категорию ставим сами.
+      for (const name of ['CTCP TM BACH HOA XANH', 'CTY CO PHAN THUONG MAI BACH HOA XANH', 'BHX 12345']) {
+        expect(tagOf({ beneficiaryName: name })).toBe('Продукты');
+      }
       const r = toZenTransactions(parsed({ beneficiaryName: 'CTCP TM BACH HOA XANH' }), { ...ctx, rules });
-      expect(r.ok && r.txns[0]).toMatchObject({ tag: null, payee: 'Bach Hoa Xanh', originalPayee: 'CTCP TM BACH HOA XANH' });
+      expect(r.ok && r.txns[0]).toMatchObject({ payee: 'Bach Hoa Xanh', originalPayee: 'CTCP TM BACH HOA XANH' });
+      expect(r.ok && r.txns[0]!.tag).toHaveLength(1);
     });
     it('физлицо, 140–450 тыс., сумма кратна 1000 — доставка еды', () => {
       expect(tagOf({ beneficiaryName: 'NGUYEN VAN TEST', amount: 245000 })).toBe('Доставка еды');
