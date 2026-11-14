@@ -3,7 +3,7 @@
 import { build } from 'esbuild';
 import { copyFileSync, mkdirSync, writeFileSync } from 'node:fs';
 
-const ENTRY_POINTS = ['run', 'checkZen', 'tgSetup', 'dailySummary', 'install', 'uninstall', 'dumpSample', 'dumpGrabSample'];
+const ENTRY_POINTS = ['run', 'checkZen', 'showLearned', 'tgSetup', 'dailySummary', 'install', 'uninstall', 'dumpSample', 'dumpGrabSample'];
 
 const res = await build({
   entryPoints: ['src/gas/main.ts'],

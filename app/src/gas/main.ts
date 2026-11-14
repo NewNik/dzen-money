@@ -24,7 +24,8 @@ import {
   ZEN_DIFF_URL,
 } from '../core/zen/diff';
 import { formatDecision, planMessages } from '../core/zen/plan';
-import { compileRules, type CompiledRule, type Rule } from '../core/zen/rules';
+import { canonFromRules, canonKeys, dynamicRules, formatDynamicRule } from '../core/zen/dynamic-rules';
+import { compileRules, findRule, type CompiledRule, type Rule } from '../core/zen/rules';
 import defaultRules from '../../config/rules.json';
 import {
   addStats,
@@ -95,11 +96,16 @@ function accountsMap(props: GoogleAppsScript.Properties.Properties): Record<stri
   return out;
 }
 
-/** Правила категорий: личные из свойства RULES (проверяются первыми), затем встроенные из config/rules.json. */
+/**
+ * Правила категорий по порядку: личные из свойства RULES, динамические (выведенные из правок в приложении),
+ * встроенные из config/rules.json. Первое совпадение побеждает.
+ */
 function loadRules(
   props: GoogleAppsScript.Properties.Properties,
   tagsByTitle: Record<string, string>,
   tag: string,
+  /** Строит динамические правила по обычным (нужны для единых имён получателей); без него динамических нет. */
+  dynamic?: (fixed: readonly CompiledRule[]) => CompiledRule[],
 ): { rules: CompiledRule[]; errors: string[] } {
   let own: Rule[] = [];
   const bad: string[] = [];
@@ -113,10 +119,12 @@ function loadRules(
       bad.push(`RULES: неверный JSON — ${e instanceof Error ? e.message : String(e)}`);
     }
   }
-  const { rules, errors } = compileRules([...own, ...(defaultRules as Rule[])], tagsByTitle);
-  const all = [...bad, ...errors];
+  const personal = compileRules(own, tagsByTitle);
+  const builtin = compileRules(defaultRules as Rule[], tagsByTitle);
+  const all = [...bad, ...personal.errors, ...builtin.errors];
   for (const e of all) console.error(`${tag} ${e}`);
-  return { rules, errors: all };
+  const learned = dynamic ? dynamic([...personal.rules, ...builtin.rules]) : [];
+  return { rules: [...personal.rules, ...learned, ...builtin.rules], errors: all };
 }
 
 // --- Telegram ---
@@ -157,6 +165,10 @@ function throttled(props: GoogleAppsScript.Properties.Properties, items: { key: 
   if (items.length) props.setProperty('ALERTS', JSON.stringify(state));
   return out;
 }
+
+/** Динамические правила включены, пока свойство LEARN не равно `off`. */
+const learnEnabled = (props: GoogleAppsScript.Properties.Properties): boolean =>
+  (props.getProperty('LEARN') ?? '').trim().toLowerCase() !== 'off';
 
 const isWriteMode = (props: GoogleAppsScript.Properties.Properties): boolean =>
   (props.getProperty('MODE') ?? '').trim().toLowerCase() === 'write';
@@ -218,7 +230,13 @@ function syncToZen(
   // Полная выгрузка (~2,5 МБ) только когда есть что записать: нужна для проверки дублей по всем операциям.
   const full = zenDiff(token, fullFetchRequest(now));
   const meta = readMeta(full);
-  const { rules, errors } = loadRules(PropertiesService.getScriptProperties(), meta.tagsByTitle, tag);
+  const props = PropertiesService.getScriptProperties();
+  const ownAccounts = new Set(Object.values(accounts));
+  const { rules, errors } = loadRules(props, meta.tagsByTitle, tag, (fixed) => {
+    if (!learnEnabled(props)) return [];
+    return dynamicRules(readFullTransactions(full), ownAccounts, meta.tagTitles, canonFromRules(fixed)).rules;
+  });
+  console.log(`${tag} динамических правил: ${rules.filter((r) => r.origin === 'dynamic').length}${learnEnabled(props) ? '' : ' (LEARN=off)'}`);
   for (const e of errors) sys.push({ key: 'rules:' + e, text: `Правила категорий: ${e}` });
   const plans = planMessages(
     pending.map((m) => ({ msgId: m.id, txn: m.txn! })),
@@ -235,7 +253,7 @@ function syncToZen(
     creatable.flatMap((p) => p.creates),
     readFullTransactions(full),
     {
-      ownAccounts: new Set(Object.values(accounts)),
+      ownAccounts,
       instruments: meta.instruments,
       tagsByTitle: meta.tagsByTitle,
       heuristicTagIds: new Set(rules.filter((r) => r.rule.person && r.tagId).map((r) => r.tagId!)),
@@ -300,7 +318,10 @@ function syncToZen(
     const m = byId.get(p.msgId)!;
     const main = p.creates[0] ?? p.decisions[0]?.txn; // creates — после сверки с чеками
     const category = tagName(main?.tag);
-    m.line = txnLine(m.txn!, category);
+    const used = findRule(m.txn!, rules);
+    const remembered = used?.origin === 'dynamic' && used.tagId !== null && main?.tag?.[0] === used.tagId;
+    if (remembered) console.log(`${tag} msg=${p.msgId} категория по динамическому правилу (${used.rule.field === 'details' ? 'назначение платежа' : 'получатель'})`);
+    m.line = txnLine(m.txn!, category && remembered ? `${category} (по вашим правкам)` : category);
     m.reason = p.reason;
     m.result =
       p.status === 'done' ? 'done'
@@ -546,6 +567,28 @@ export function checkZen(): void {
   const { rules } = loadRules(props, meta.tagsByTitle, '[rules]');
   console.log(`Правил категорий: ${rules.length} (ошибки, если есть, — строками выше).`);
   console.log(`Режим: ${isWriteMode(props) ? 'write — запись включена' : 'dry-run — запись выключена'}.`);
+}
+
+/** Запустить вручную: печатает динамические правила — что скрипт запомнил по правкам в приложении. Ничего не пишет. */
+export function showLearned(): void {
+  const props = PropertiesService.getScriptProperties();
+  const token = props.getProperty('ZEN_TOKEN');
+  if (!token) {
+    console.error('Не задано свойство ZEN_TOKEN.');
+    return;
+  }
+  const full = zenDiff(token, fullFetchRequest(Math.floor(Date.now() / 1000)));
+  const meta = readMeta(full);
+  let learned: ReturnType<typeof dynamicRules>['learned'] = [];
+  let shops = new Set<string>();
+  loadRules(props, meta.tagsByTitle, '[rules]', (fixed) => {
+    const d = dynamicRules(readFullTransactions(full), new Set(Object.values(accountsMap(props))), meta.tagTitles, canonFromRules(fixed));
+    learned = d.learned;
+    shops = canonKeys(fixed);
+    return d.rules;
+  });
+  console.log(`Динамических правил: ${learned.length}${learnEnabled(props) ? '' : ' — выключены (LEARN=off)'}.`);
+  for (const r of learned) console.log(formatDynamicRule(r, meta.tagTitles, shops));
 }
 
 /** Запустить один раз вручную: создаёт метки и таймер на каждые 5 минут. */

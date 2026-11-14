@@ -28,6 +28,7 @@ var ZenApp = (() => {
     dumpSample: () => dumpSample,
     install: () => install,
     run: () => run,
+    showLearned: () => showLearned,
     tgSetup: () => tgSetup,
     uninstall: () => uninstall
   });
@@ -460,8 +461,9 @@ var ZenApp = (() => {
     if (t.kind !== "expense" && t.kind !== "income") return void 0;
     const payee = foldText((t.kind === "expense" ? t.beneficiaryName : t.remitter) ?? "");
     const details = foldText(t.details ?? "");
-    return rules.find(({ rule, test }) => {
+    return rules.find(({ rule, test, matches }) => {
       if (!conditionsOk(rule, t)) return false;
+      if (matches) return matches(t);
       const f = rule.field ?? "any";
       return (f === "payee" || f === "any") && payee !== "" && test(payee) || (f === "details" || f === "any") && details !== "" && test(details);
     });
@@ -801,7 +803,9 @@ var ZenApp = (() => {
       default:
         return { ok: false, reason: "ни один счёт из письма не указан в ACCOUNTS" };
     }
-    const rule = findRule(t, ctx.rules ?? []);
+    const rules = ctx.rules ?? [];
+    const rule = findRule(t, rules);
+    const rename = rule?.rule.payee ?? (rule?.origin === "dynamic" ? findRule(t, rules.filter((r) => r.origin !== "dynamic"))?.rule.payee : void 0);
     const main = {
       ...blank(ctx),
       tag: rule?.tagId ? [rule.tagId] : null,
@@ -812,7 +816,7 @@ var ZenApp = (() => {
       outcomeInstrument: instrument,
       outcomeAccount,
       outcome,
-      payee: rule?.rule.payee ?? payee,
+      payee: rename ?? payee,
       originalPayee: payee,
       comment: withMarker(cleanDetails(t.details, t.remitter), marker(t.orderNumber)),
       date: t.dateLocal
@@ -891,6 +895,143 @@ var ZenApp = (() => {
     const acc = t.outcomeAccount === t.incomeAccount ? t.outcomeAccount.slice(0, 8) : `${t.outcomeAccount.slice(0, 8)}→${t.incomeAccount.slice(0, 8)}`;
     const tag = t.tag?.length ? t.tag.map((id) => tagTitles[id] ?? id).join(",") : "-";
     return `${d.action} id=${t.id} ${t.date} ${sum} acc=${acc} tag=${tag} comment="${maskLongDigits(t.comment ?? "")}"`;
+  }
+
+  // src/core/zen/dynamic-rules.ts
+  var NOISE = /* @__PURE__ */ new Set([
+    "chuyen",
+    "tien",
+    "khoan",
+    "thanh",
+    "toan",
+    "transfer",
+    "payment",
+    "pay",
+    "qr",
+    "ck",
+    "ct",
+    "tt",
+    "mbvcb",
+    "vcb",
+    "cho",
+    "tu",
+    "den",
+    "ung",
+    "dung",
+    "giao",
+    "dich",
+    "ma",
+    "so",
+    "don",
+    "hang",
+    "order",
+    "bill",
+    "the",
+    "to",
+    "from"
+  ]);
+  function detailsKey(text) {
+    const words = foldText(text ?? "").split(/[^a-z0-9]+/).filter((w) => w.length > 1 && !/\d/.test(w) && !NOISE.has(w));
+    return words.length >= 2 ? words.join(" ") : void 0;
+  }
+  function payeeKey(text) {
+    return foldText(text ?? "") || void 0;
+  }
+  var stripMarkers = (comment) => (comment ?? "").replace(/\[[a-z]+:[^\]]*\]/g, " ");
+  var FEATURES = [
+    {
+      id: "details",
+      key: detailsKey,
+      // Автотекст «<имя отправителя> transfer» в комментарий не попадает — и здесь его тоже нет.
+      fromEmail: (t) => cleanDetails(t.details, t.remitter),
+      fromZen: (t) => stripMarkers(t.comment)
+    },
+    {
+      id: "payee",
+      key: payeeKey,
+      fromEmail: (t) => t.kind === "income" ? t.remitter : t.beneficiaryName,
+      fromZen: (t) => t.originalPayee ?? t.payee ?? void 0
+    }
+  ];
+  function canonFromRules(rules) {
+    const renames = rules.filter((r) => r.rule.payee && r.rule.field !== "details" && !r.matches);
+    return (payee) => {
+      const folded = foldText(payee);
+      return renames.find((r) => r.test(folded))?.rule.payee ?? payee;
+    };
+  }
+  var featureKey = (f, text, canon) => f.key(f.id === "payee" && text && canon ? canon(text) : text);
+  function observe(txns, ownAccounts, canon) {
+    const out = [];
+    for (const t of txns) {
+      if (t.deleted || !isScriptOp(t) || hasEvidence(t) || untouched(t)) continue;
+      if (t.outcomeAccount !== t.incomeAccount || !ownAccounts.has(t.outcomeAccount)) continue;
+      const tagId = t.tag?.[0];
+      if (!tagId) continue;
+      const direction = t.outcome > 0 ? "expense" : "income";
+      for (const f of FEATURES) {
+        const key2 = featureKey(f, f.fromZen(t), canon);
+        if (key2) out.push({ direction, feature: f.id, key: key2, tagId, date: t.date, created: t.created });
+      }
+    }
+    return out;
+  }
+  var DEFAULT_POLICY = { window: 3 };
+  function learn(observations, policy = DEFAULT_POLICY) {
+    const groups = /* @__PURE__ */ new Map();
+    for (const o of observations) {
+      const id = `${o.direction}|${o.feature}|${o.key}`;
+      const g = groups.get(id);
+      if (g) g.push(o);
+      else groups.set(id, [o]);
+    }
+    const out = [];
+    for (const g of groups.values()) {
+      g.sort((a, b) => a.date < b.date ? -1 : a.date > b.date ? 1 : a.created - b.created);
+      const recent = g.slice(-policy.window);
+      const votes = /* @__PURE__ */ new Map();
+      for (const o of recent) votes.set(o.tagId, (votes.get(o.tagId) ?? 0) + 1);
+      const last = recent[recent.length - 1];
+      let best = last.tagId;
+      for (const [tagId, n] of votes) if (n > votes.get(best)) best = tagId;
+      out.push({
+        direction: last.direction,
+        feature: last.feature,
+        key: last.key,
+        tagId: best,
+        votes: votes.get(best),
+        window: recent.length,
+        lastDate: last.date
+      });
+    }
+    return out;
+  }
+  function compileDynamic(rules, tagTitles, canon) {
+    const out = [];
+    for (const f of FEATURES) {
+      for (const r of rules) {
+        const title = tagTitles[r.tagId];
+        if (r.feature !== f.id || title === void 0) continue;
+        out.push({
+          origin: "dynamic",
+          rule: { match: r.key, field: f.id, tag: title },
+          tagId: r.tagId,
+          test: () => false,
+          matches: (t) => t.kind === r.direction && featureKey(f, f.fromEmail(t), canon) === r.key
+        });
+      }
+    }
+    return out;
+  }
+  function dynamicRules(txns, ownAccounts, tagTitles, canon, policy = DEFAULT_POLICY) {
+    const learned = learn(observe(txns, ownAccounts, canon), policy);
+    return { learned, rules: compileDynamic(learned, tagTitles, canon) };
+  }
+  var canonKeys = (rules) => new Set(rules.flatMap((r) => r.rule.payee ? [foldText(r.rule.payee)] : []));
+  function formatDynamicRule(r, tagTitles, shops = /* @__PURE__ */ new Set()) {
+    const key2 = r.feature === "payee" && !shops.has(r.key) && looksLikePerson(r.key) ? r.key.split(" ").map((w) => w.charAt(0) + ".").join(" ") : r.key;
+    const what = r.feature === "details" ? "назначение" : r.direction === "income" ? "отправитель" : "получатель";
+    return `${what} «${key2}» → ${tagTitles[r.tagId] ?? r.tagId} (${r.votes} из ${r.window}, последняя ${r.lastDate})`;
   }
 
   // config/rules.json
@@ -1262,7 +1403,7 @@ var ZenApp = (() => {
     if (raw) for (const [k, v] of Object.entries(JSON.parse(raw))) out[k.replace(/\D/g, "")] = v;
     return out;
   }
-  function loadRules(props, tagsByTitle, tag) {
+  function loadRules(props, tagsByTitle, tag, dynamic) {
     let own = [];
     const bad = [];
     const raw = props.getProperty("RULES");
@@ -1275,10 +1416,12 @@ var ZenApp = (() => {
         bad.push(`RULES: неверный JSON — ${e instanceof Error ? e.message : String(e)}`);
       }
     }
-    const { rules, errors } = compileRules([...own, ...rules_default], tagsByTitle);
-    const all = [...bad, ...errors];
+    const personal = compileRules(own, tagsByTitle);
+    const builtin = compileRules(rules_default, tagsByTitle);
+    const all = [...bad, ...personal.errors, ...builtin.errors];
     for (const e of all) console.error(`${tag} ${e}`);
-    return { rules, errors: all };
+    const learned = dynamic ? dynamic([...personal.rules, ...builtin.rules]) : [];
+    return { rules: [...personal.rules, ...learned, ...builtin.rules], errors: all };
   }
   function tgSend(props, text) {
     const token = props.getProperty("TG_TOKEN");
@@ -1313,6 +1456,7 @@ var ZenApp = (() => {
     if (items.length) props.setProperty("ALERTS", JSON.stringify(state));
     return out;
   }
+  var learnEnabled = (props) => (props.getProperty("LEARN") ?? "").trim().toLowerCase() !== "off";
   var isWriteMode = (props) => (props.getProperty("MODE") ?? "").trim().toLowerCase() === "write";
   function zenDiff(token, body) {
     if ("deletion" in body) throw new Error("deletion в Дзен-мани не отправляем");
@@ -1332,7 +1476,13 @@ var ZenApp = (() => {
     const now = Math.floor(Date.now() / 1e3);
     const full = zenDiff(token, fullFetchRequest(now));
     const meta = readMeta(full);
-    const { rules, errors } = loadRules(PropertiesService.getScriptProperties(), meta.tagsByTitle, tag);
+    const props = PropertiesService.getScriptProperties();
+    const ownAccounts = new Set(Object.values(accounts));
+    const { rules, errors } = loadRules(props, meta.tagsByTitle, tag, (fixed) => {
+      if (!learnEnabled(props)) return [];
+      return dynamicRules(readFullTransactions(full), ownAccounts, meta.tagTitles, canonFromRules(fixed)).rules;
+    });
+    console.log(`${tag} динамических правил: ${rules.filter((r) => r.origin === "dynamic").length}${learnEnabled(props) ? "" : " (LEARN=off)"}`);
     for (const e of errors) sys.push({ key: "rules:" + e, text: `Правила категорий: ${e}` });
     const plans = planMessages(
       pending.map((m) => ({ msgId: m.id, txn: m.txn })),
@@ -1347,7 +1497,7 @@ var ZenApp = (() => {
       creatable.flatMap((p) => p.creates),
       readFullTransactions(full),
       {
-        ownAccounts: new Set(Object.values(accounts)),
+        ownAccounts,
         instruments: meta.instruments,
         tagsByTitle: meta.tagsByTitle,
         heuristicTagIds: new Set(rules.filter((r) => r.rule.person && r.tagId).map((r) => r.tagId)),
@@ -1409,7 +1559,10 @@ var ZenApp = (() => {
       const m = byId.get(p.msgId);
       const main = p.creates[0] ?? p.decisions[0]?.txn;
       const category = tagName(main?.tag);
-      m.line = txnLine(m.txn, category);
+      const used = findRule(m.txn, rules);
+      const remembered = used?.origin === "dynamic" && used.tagId !== null && main?.tag?.[0] === used.tagId;
+      if (remembered) console.log(`${tag} msg=${p.msgId} категория по динамическому правилу (${used.rule.field === "details" ? "назначение платежа" : "получатель"})`);
+      m.line = txnLine(m.txn, category && remembered ? `${category} (по вашим правкам)` : category);
       m.reason = p.reason;
       m.result = p.status === "done" ? "done" : p.status === "duplicate" ? "duplicate" : p.status === "unmapped" ? "unparsed" : write ? null : "dryrun";
     }
@@ -1625,6 +1778,26 @@ var ZenApp = (() => {
     console.log(`Правил категорий: ${rules.length} (ошибки, если есть, — строками выше).`);
     console.log(`Режим: ${isWriteMode(props) ? "write — запись включена" : "dry-run — запись выключена"}.`);
   }
+  function showLearned() {
+    const props = PropertiesService.getScriptProperties();
+    const token = props.getProperty("ZEN_TOKEN");
+    if (!token) {
+      console.error("Не задано свойство ZEN_TOKEN.");
+      return;
+    }
+    const full = zenDiff(token, fullFetchRequest(Math.floor(Date.now() / 1e3)));
+    const meta = readMeta(full);
+    let learned = [];
+    let shops = /* @__PURE__ */ new Set();
+    loadRules(props, meta.tagsByTitle, "[rules]", (fixed) => {
+      const d = dynamicRules(readFullTransactions(full), new Set(Object.values(accountsMap(props))), meta.tagTitles, canonFromRules(fixed));
+      learned = d.learned;
+      shops = canonKeys(fixed);
+      return d.rules;
+    });
+    console.log(`Динамических правил: ${learned.length}${learnEnabled(props) ? "" : " — выключены (LEARN=off)"}.`);
+    for (const r of learned) console.log(formatDynamicRule(r, meta.tagTitles, shops));
+  }
   function install() {
     Object.keys(L).forEach((k) => label(L[k]));
     Object.keys(R).forEach((k) => label(R[k]));
@@ -1747,6 +1920,7 @@ var ZenApp = (() => {
 
 function run() { return ZenApp.run(); }
 function checkZen() { return ZenApp.checkZen(); }
+function showLearned() { return ZenApp.showLearned(); }
 function tgSetup() { return ZenApp.tgSetup(); }
 function dailySummary() { return ZenApp.dailySummary(); }
 function install() { return ZenApp.install(); }

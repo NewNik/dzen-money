@@ -31,6 +31,10 @@ export interface CompiledRule {
   /** `null` — правило без категории. */
   tagId: string | null;
   test: (s: string) => boolean;
+  /** Откуда правило: `dynamic` — выведено из правок в приложении (см. dynamic-rules.ts). */
+  origin?: 'static' | 'dynamic';
+  /** Своя проверка по всей операции вместо `test` по тексту поля. */
+  matches?: (t: ParsedBankTxn) => boolean;
 }
 
 /** `Miền Trung` → `mien trung`: NFD, без диакритик, đ → d, нижний регистр, схлопнутые пробелы. */
@@ -110,8 +114,9 @@ export function findRule(t: ParsedBankTxn, rules: readonly CompiledRule[]): Comp
   if (t.kind !== 'expense' && t.kind !== 'income') return undefined;
   const payee = foldText((t.kind === 'expense' ? t.beneficiaryName : t.remitter) ?? '');
   const details = foldText(t.details ?? '');
-  return rules.find(({ rule, test }) => {
+  return rules.find(({ rule, test, matches }) => {
     if (!conditionsOk(rule, t)) return false;
+    if (matches) return matches(t);
     const f = rule.field ?? 'any';
     return ((f === 'payee' || f === 'any') && payee !== '' && test(payee)) || ((f === 'details' || f === 'any') && details !== '' && test(details));
   });

@@ -78,11 +78,12 @@ export type EvidenceOutcome =
   /** В Дзен-мани нет категории с таким названием. */
   | { status: 'no-tag'; ev: Evidence };
 
-const isScriptOp = (t: ZenTransaction): boolean => /\[vcb:[^\]]+\]/.test(t.comment ?? '') && !/\[vcb:[^\]]+:fee\]/.test(t.comment ?? '');
+/** Операция записана скриптом по письму банка (не комиссия). */
+export const isScriptOp = (t: ZenTransaction): boolean => /\[vcb:[^\]]+\]/.test(t.comment ?? '') && !/\[vcb:[^\]]+:fee\]/.test(t.comment ?? '');
 /** На операции уже стоит метка какого-то подтверждения (`[grab:…]`). */
-const hasEvidence = (t: ZenTransaction): boolean => /\[(?!vcb:)[a-z]+:[^\]]+\]/.test(t.comment ?? '');
+export const hasEvidence = (t: ZenTransaction): boolean => /\[(?!vcb:)[a-z]+:[^\]]+\]/.test(t.comment ?? '');
 /** Человек не менял операцию: сервер сам правит её в первую секунду (автокатегория), всё позже — правка из приложения. */
-const untouched = (t: ZenTransaction): boolean => t.changed - t.created <= 60;
+export const untouched = (t: ZenTransaction): boolean => t.changed - t.created <= 60;
 
 const DAY = 86_400_000;
 
